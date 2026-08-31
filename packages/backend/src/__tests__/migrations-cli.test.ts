@@ -209,7 +209,10 @@ describePostgres("lifecycle: status / list / latest / plan", () => {
   });
 
   afterEach(async () => {
-    if (rt) await rt.close();
+    if (rt) {
+      await rt.close();
+      rt = undefined as unknown as CliRuntime;
+    }
     clearMigrations();
   });
 
@@ -361,7 +364,10 @@ describePostgres("migrate:baseline", () => {
   });
 
   afterEach(async () => {
-    if (rt) await rt.close();
+    if (rt) {
+      await rt.close();
+      rt = undefined as unknown as CliRuntime;
+    }
     clearMigrations();
   });
 
@@ -478,7 +484,10 @@ describePostgres("migrate:rollback", () => {
   });
 
   afterEach(async () => {
-    if (rt) await rt.close();
+    if (rt) {
+      await rt.close();
+      rt = undefined as unknown as CliRuntime;
+    }
     clearMigrations();
   });
 
