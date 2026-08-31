@@ -612,25 +612,97 @@ describe("SocketTransport — hello/resync protocol", () => {
     await Promise.all([first, duplicate, nextGeneration]);
   });
 
-  it("rejects pending RPC and resync acknowledgements on disconnect", async () => {
-    const transport = makeTransport(async () => "token");
-    currentSocket.connect();
-    await Promise.resolve();
-    await Promise.resolve();
-    ackHello("user");
+  it("rejects resync acknowledgements at disconnect; a pending RPC waits out the resend grace", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = makeTransport(async () => "token");
+      currentSocket.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      ackHello("user");
+      await vi.advanceTimersByTimeAsync(0);
 
-    const call = transport.get("/posts");
-    const resync = transport.resync([
-      { key: "posts", modelType: "post", steps: [] },
-    ]);
-    const callRejection = expect(call).rejects.toThrow("Disconnected");
-    const resyncRejection = expect(resync).rejects.toThrow("Disconnected");
-    await Promise.resolve();
-    await Promise.resolve();
-    currentSocket.disconnect();
+      const call = transport.get("/posts");
+      const resync = transport.resync([
+        { key: "posts", modelType: "post", steps: [] },
+      ]);
+      const callRejection = expect(call).rejects.toThrow("Disconnected");
+      const resyncRejection = expect(resync).rejects.toThrow("Disconnected");
+      await vi.advanceTimersByTimeAsync(0);
+      currentSocket.disconnect();
 
-    await callRejection;
-    await resyncRejection;
+      // The resync waiter dies with the socket; the RPC is suspended
+      // for a reconnect and only rejects when none arrives in time.
+      await resyncRejection;
+      await vi.advanceTimersByTimeAsync(15_100);
+      await callRejection;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-sends a suspended RPC after the reconnect hello and resolves it", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = makeTransport(async () => "token");
+      currentSocket.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      ackHello("user");
+      await vi.advanceTimersByTimeAsync(0);
+
+      const call = transport.get("/posts");
+      await vi.advanceTimersByTimeAsync(0);
+      const firstEmit = currentSocket.emits.filter(
+        (entry) => entry.event === "call",
+      );
+      expect(firstEmit).toHaveLength(1);
+      const requestId = firstEmit[0]!.args[0] as string;
+
+      currentSocket.disconnect();
+      await vi.advanceTimersByTimeAsync(1_000);
+      currentSocket.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      ackHello("user");
+      await vi.advanceTimersByTimeAsync(0);
+
+      const resent = currentSocket.emits.filter(
+        (entry) => entry.event === "call",
+      );
+      expect(resent).toHaveLength(2);
+      expect(resent[1]!.args[0]).toBe(requestId);
+
+      respondToLatestCall({ result: [{ id: "p1" }], success: true });
+      await expect(call).resolves.toEqual([{ id: "p1" }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a suspended RPC instead of re-sending it when the reconnect resolves a different user", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = makeTransport(async () => "token");
+      currentSocket.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      ackHello("user-1");
+      await vi.advanceTimersByTimeAsync(0);
+
+      const call = transport.post("/notes", { text: "mine" });
+      const rejection = expect(call).rejects.toThrow("Disconnected");
+      await vi.advanceTimersByTimeAsync(0);
+
+      currentSocket.disconnect();
+      currentSocket.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      ackHello("user-2");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(
+        currentSocket.emits.filter((entry) => entry.event === "call"),
+      ).toHaveLength(1);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects an RPC when a fresh session generation starts", async () => {

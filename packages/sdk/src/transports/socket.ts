@@ -40,8 +40,26 @@ const WATCHDOG_BACKOFF_CAP_MS = 60_000;
  */
 const RPC_STARVATION_MS = 30_000;
 const KICK_FLOOR_MS = 2_000;
+/**
+ * How long suspended in-flight calls wait for a reconnect hello before
+ * rejecting with the disconnect error. Long enough to ride out a
+ * watchdog rebuild or a brief network blip; short enough that a real
+ * outage still fails visibly instead of at the 120s call timeout.
+ */
+const RESEND_GRACE_MS = 15_000;
 
 const uid = new ShortId({ length: 10 });
+
+interface PendingCall {
+  timer: ReturnType<typeof setTimeout>;
+  reject: (error: Error) => void;
+  sentAt: number;
+  /** Caller declared its own timeout; the stall clock skips it. */
+  watchdogExempt?: boolean;
+  /** The original frame, kept so the call can be re-sent after a
+   * reconnect instead of dying with the socket. */
+  frame: { method: string; path: string; data: any };
+}
 
 export interface SocketTransportConfig {
   url: string;
@@ -153,16 +171,21 @@ export class SocketTransport extends EventEmitter implements Transport {
   private version: string;
   private getToken: () => Promise<string | null>;
   private inflight = new Map<string, Promise<any>>();
-  private pendingCalls = new Map<
-    string,
-    {
-      timer: ReturnType<typeof setTimeout>;
-      reject: (error: Error) => void;
-      sentAt: number;
-      /** Caller declared its own timeout; the stall clock skips it. */
-      watchdogExempt?: boolean;
-    }
-  >();
+  private pendingCalls = new Map<string, PendingCall>();
+  /**
+   * Calls that were in flight when the socket dropped. They are not
+   * rejected at the disconnect: the response listener stays attached,
+   * the caller's own timeout keeps running, and once the next hello
+   * resolves the frames are re-sent under their original ids. The
+   * server refuses a re-sent mutation it already executed
+   * (rpc_replayed), so a lost response surfaces as a precise error
+   * instead of a silent double-execution. If no hello lands within
+   * RESEND_GRACE_MS the calls reject with the disconnect error.
+   */
+  private suspendedCalls = new Map<string, PendingCall>();
+  private suspendGraceTimer: ReturnType<typeof setTimeout> | null = null;
+  private suspendError: Error | null = null;
+  private suspendUserId: string | null = null;
   private pendingWaiters = new Set<PendingWaiter>();
   private handshakeTimeout: number;
   private sessionGeneration = 0;
@@ -474,7 +497,8 @@ export class SocketTransport extends EventEmitter implements Transport {
           : Date.now() - this.lastHelloAckAt,
       subscriptionCount: this.subscriptions.size,
       recoveryAttempts: this.watchdogRecoveries,
-      pendingCallCount: this.pendingCalls.size + pendingResyncCount,
+      pendingCallCount:
+        this.pendingCalls.size + this.suspendedCalls.size + pendingResyncCount,
       msSinceOldestPendingCall:
         oldestPending === null ? null : Date.now() - oldestPending,
     };
@@ -562,6 +586,7 @@ export class SocketTransport extends EventEmitter implements Transport {
           this.session.resolve(userId);
           this.confirmedHelloToken = token;
           this.sessionReadyForEvents = true;
+          this._resendSuspendedCalls();
           this._scheduleWatchdog();
           resolveHello();
           this.emit("resync-required");
@@ -602,11 +627,88 @@ export class SocketTransport extends EventEmitter implements Transport {
 
   private _handleSocketDisconnect(reason?: string): void {
     if (this.connection.state.status === "disconnected") return;
-    this._advanceGeneration(
-      new Error(reason ? `Disconnected: ${reason}` : "Disconnected"),
+    const error = new Error(
+      reason ? `Disconnected: ${reason}` : "Disconnected",
     );
+    this._suspendPendingCalls(error);
+    this._advanceGeneration(error);
     this.connection.disconnected();
     this.emit("disconnected");
+    this._scheduleWatchdog();
+  }
+
+  /**
+   * Park every in-flight call instead of rejecting it with the socket.
+   * Each call's own timeout keeps running and its response listener
+   * stays attached; `_resendSuspendedCalls` re-sends the frames once
+   * the next hello resolves, and the grace timer rejects them if no
+   * hello lands in time.
+   */
+  private _suspendPendingCalls(error: Error): void {
+    if (this.pendingCalls.size === 0) return;
+    this.suspendError = error;
+    this.suspendUserId = this.session.state.userId;
+    for (const [id, call] of this.pendingCalls) {
+      this.suspendedCalls.set(id, call);
+    }
+    this.pendingCalls.clear();
+    if (!this.suspendGraceTimer) {
+      this.suspendGraceTimer = setTimeout(() => {
+        this.suspendGraceTimer = null;
+        this._rejectSuspended(
+          this.suspendError ?? new Error("Disconnected"),
+        );
+      }, RESEND_GRACE_MS);
+    }
+  }
+
+  private _resendSuspendedCalls(): void {
+    if (this.suspendGraceTimer) {
+      clearTimeout(this.suspendGraceTimer);
+      this.suspendGraceTimer = null;
+    }
+    if (this.suspendedCalls.size === 0) return;
+    // The calls were issued for the identity that held the session
+    // when the socket dropped. If the reconnect hello resolved a
+    // different user, executing them now would attribute another
+    // person's actions to the new session; fail them instead.
+    if (this.session.state.userId !== this.suspendUserId) {
+      this._rejectSuspended(
+        this.suspendError ?? new Error("Disconnected"),
+      );
+      return;
+    }
+    const calls = [...this.suspendedCalls.entries()];
+    this.suspendedCalls.clear();
+    for (const [id, call] of calls) {
+      call.sentAt = Date.now();
+      this.pendingCalls.set(id, call);
+      log.debug(
+        `↻ ${call.frame.method.toUpperCase()} /${this.version}${call.frame.path} (resend after reconnect)`,
+      );
+      this.socket.emit(
+        "call",
+        id,
+        call.frame.method.toUpperCase(),
+        `/${this.version}${call.frame.path}`,
+        call.frame.data,
+      );
+    }
+    this._scheduleWatchdog();
+  }
+
+  private _rejectSuspended(error: Error): void {
+    if (this.suspendGraceTimer) {
+      clearTimeout(this.suspendGraceTimer);
+      this.suspendGraceTimer = null;
+    }
+    if (this.suspendedCalls.size === 0) return;
+    for (const [id, call] of this.suspendedCalls) {
+      clearTimeout(call.timer);
+      this.socket.off(id);
+      call.reject(error);
+    }
+    this.suspendedCalls.clear();
     this._scheduleWatchdog();
   }
 
@@ -704,7 +806,9 @@ export class SocketTransport extends EventEmitter implements Transport {
   async terminateSession(): Promise<void> {
     this.confirmedHelloToken = null;
     this.session.terminate();
-    this._advanceGeneration(new Error(SESSION_BOUNDARY_ERRORS.terminated));
+    const terminated = new Error(SESSION_BOUNDARY_ERRORS.terminated);
+    this._rejectSuspended(terminated);
+    this._advanceGeneration(terminated);
     this._scheduleWatchdog();
     if (this.socket.connected) {
       await new Promise<void>((resolve, reject) => {
@@ -839,6 +943,7 @@ export class SocketTransport extends EventEmitter implements Transport {
       const timeout = setTimeout(() => {
         this.socket.off(id);
         this.pendingCalls.delete(id);
+        this.suspendedCalls.delete(id);
         this._scheduleWatchdog();
         log.debug(
           `✗ ${method.toUpperCase()} ${fullPath} timeout (${(timeoutMs / 1000).toFixed(0)}s)`,
@@ -849,6 +954,7 @@ export class SocketTransport extends EventEmitter implements Transport {
         timer: timeout,
         reject,
         sentAt: Date.now(),
+        frame: { method, path, data },
         // A caller that declared its own timeout has told us the
         // budget for this call; the watchdog must not second-guess it
         // at the stale window. Server work that legitimately runs for
@@ -864,6 +970,7 @@ export class SocketTransport extends EventEmitter implements Transport {
         this._noteRpcResponse();
         clearTimeout(timeout);
         this.pendingCalls.delete(id);
+        this.suspendedCalls.delete(id);
         this._scheduleWatchdog();
         const ms = (performance.now() - t0).toFixed(0);
         try {
@@ -1026,6 +1133,7 @@ export class SocketTransport extends EventEmitter implements Transport {
     if (this.isDisposed) return;
     this.isDisposed = true;
     this._scheduleWatchdog();
+    this._rejectSuspended(new Error("Transport disposed"));
     this._advanceGeneration(new Error("Transport disposed"));
     this.emit("dispose");
     this.socket.removeAllListeners?.();

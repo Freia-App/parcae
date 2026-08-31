@@ -1309,6 +1309,46 @@ export function createApp(config: AppConfig): ParcaeApp {
             const sessionOperation = sessionSnapshot.operation;
             const isSessionCurrent = () =>
               socketSession.isOperationCurrent(sessionOperation);
+
+            // Replay guard. The SDK re-sends an un-acked call after a
+            // reconnect under its original id. A mutation the server
+            // already started must not run twice, so the first arrival
+            // of an id claims a short-lived marker and a replay is
+            // refused with a distinct code the client can surface as
+            // "this may have already completed". GETs re-execute
+            // freely. The marker is claimed before dispatch: a lost
+            // RESPONSE is the case the resend exists for, and by then
+            // the work already ran.
+            if (method.toUpperCase() !== "GET") {
+              const owner = sessionSnapshot.session?.user?.id ?? "anon";
+              const callKey = `parcae:rpc-once:${owner}:${String(requestId).slice(0, 64)}`;
+              // Fail open on a slow or dead Redis: a hung SET here
+              // would stall every socket mutation, which is worse
+              // than briefly losing replay protection.
+              const fresh = await Promise.race([
+                pubsub.tryLock(callKey, 300_000).catch(() => true),
+                new Promise<boolean>((resolve) =>
+                  setTimeout(() => resolve(true), 500),
+                ),
+              ]);
+              if (!fresh) {
+                const replayed = createSocketFakeRes(socket, requestId);
+                replayed.writeHead(409);
+                replayed.end(
+                  JSON.stringify({
+                    result: null,
+                    success: false,
+                    error: {
+                      message:
+                        "The server already received this request; it may have completed. Refresh to check before retrying.",
+                      code: "rpc_replayed",
+                      status: 409,
+                    },
+                  }),
+                );
+                return;
+              }
+            }
             try {
               // Parse query string from path
               const [pathname, qs] = path.split("?");

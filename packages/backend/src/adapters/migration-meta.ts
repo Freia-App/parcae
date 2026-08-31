@@ -56,7 +56,8 @@ export interface MigrationMetaRow {
  * get `0` defaults for both — correct for "applied, effect unknown".
  */
 export async function ensureMetaTable(db: Knex): Promise<void> {
-  await db.raw(`
+  try {
+    await db.raw(`
       CREATE TABLE IF NOT EXISTS "${META_TABLE}" (
         "name"         VARCHAR(512) PRIMARY KEY,
         "checksum"     VARCHAR(64)  NOT NULL,
@@ -68,6 +69,13 @@ export async function ensureMetaTable(db: Knex): Promise<void> {
         "appliedAt"    VARCHAR(32)  NOT NULL
       )
     `);
+  } catch (err) {
+    // IF NOT EXISTS does not make concurrent creation safe: two callers
+    // that both pass the existence check race the catalog insert, and
+    // the loser gets 23505 (pg_type unique) or 42P07 (already exists).
+    // The table exists either way, so losing that race is success.
+    if (!(await db.schema.hasTable(META_TABLE))) throw err;
+  }
 
   // Additive upgrade — add newer columns to an existing meta table. The
   // try/catch tolerates the "duplicate column" a racing second caller hits

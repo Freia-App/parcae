@@ -149,7 +149,6 @@ describe("SocketTransport — RPC-stall watchdog", () => {
     const events = recoverEvents(transport);
 
     const pending = transport.get("/nudges");
-    const rejection = expect(pending).rejects.toThrow("Disconnected");
     await vi.advanceTimersByTimeAsync(0);
     expect(
       currentSocket.emits.filter((e) => e.event === "call"),
@@ -161,7 +160,15 @@ describe("SocketTransport — RPC-stall watchdog", () => {
     await vi.advanceTimersByTimeAsync(400);
     expect(events).toHaveLength(1);
     expect(events[0].reason).toBe("rpc-stalled");
-    await rejection;
+
+    // The rebuild reconnects; the suspended call re-sends under its
+    // original id after the new hello, and the answer resolves it.
+    await ackHello("u1");
+    const calls = currentSocket.emits.filter((e) => e.event === "call");
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.args[0]).toBe(calls[0]!.args[0]);
+    answerCall(1, ["revived"]);
+    await expect(pending).resolves.toEqual(["revived"]);
   });
 
   it("does not rebuild while responses are still flowing", async () => {
@@ -196,11 +203,13 @@ describe("SocketTransport — RPC-stall watchdog", () => {
 
     await vi.advanceTimersByTimeAsync(5_000);
     const starved = transport.get("/starved");
-    const rejection = expect(starved).rejects.toThrow("Disconnected");
     await vi.advanceTimersByTimeAsync(8_400);
     expect(events).toHaveLength(1);
     expect(events[0].reason).toBe("rpc-stalled");
-    await rejection;
+
+    await ackHello("u1");
+    answerCall(2, ["after-rebuild"]);
+    await expect(starved).resolves.toEqual(["after-rebuild"]);
   });
 
   it("emits rpc:recovered when responses resume after a stall recovery", async () => {
@@ -209,19 +218,15 @@ describe("SocketTransport — RPC-stall watchdog", () => {
     transport.on("rpc:recovered", () => recovered.push(true));
 
     const starved = transport.get("/nudges");
-    const rejection = expect(starved).rejects.toThrow();
     await vi.advanceTimersByTimeAsync(8_400);
-    await rejection;
     expect(recovered).toHaveLength(0);
 
-    // The rebuild reconnected the fake socket; complete the new hello,
-    // then answer the next RPC: that first answered response signals
-    // recovery, exactly once.
+    // The rebuild reconnected the fake socket; complete the new hello.
+    // The starved call re-sends and its answer both resolves it and
+    // signals recovery, exactly once.
     await ackHello("u1");
-    const next = transport.get("/nudges");
-    await vi.advanceTimersByTimeAsync(0);
     answerCall(1, []);
-    await expect(next).resolves.toEqual([]);
+    await expect(starved).resolves.toEqual([]);
     expect(recovered).toHaveLength(1);
 
     const another = transport.get("/nudges");
@@ -291,7 +296,6 @@ describe("SocketTransport — RPC-stall watchdog", () => {
     const starved = transport.get("/nutrition-sprints");
     const healthy = transport.get("/events");
     await vi.advanceTimersByTimeAsync(0);
-    const rejection = expect(starved).rejects.toThrow("Disconnected");
 
     await vi.advanceTimersByTimeAsync(1_000);
     answerCall(1, []);
@@ -303,7 +307,10 @@ describe("SocketTransport — RPC-stall watchdog", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(events).toHaveLength(1);
     expect(events[0].reason).toBe("rpc-stalled");
-    await rejection;
+
+    await ackHello("u1");
+    answerCall(2, ["finally"]);
+    await expect(starved).resolves.toEqual(["finally"]);
   });
 
   it("does not let the starvation floor touch a call with its own budget", async () => {
