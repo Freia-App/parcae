@@ -1809,6 +1809,15 @@ export class BackendAdapter implements ModelAdapter {
       // empty so every depth gets an ensure (safe but adds a tiny
       // overhead).
       const preState: any = patchState[column] ?? null;
+      // Whether the batch leaves this column with no value at all. A
+      // root remove, or a root add/replace carrying null, on a DECLARED
+      // json column must persist as SQL NULL: '{}'::jsonb (and jsonb
+      // 'null') read back as a present value and count as non-null for
+      // CHECK constraints, so "cleared" and "empty object" must not be
+      // conflated. The `data` overflow column is the one json column
+      // whose absent state really is '{}'. Any later op in the batch
+      // that writes content flips this back off.
+      let rootNull = false;
       // Tracks paths whose subtree was removed earlier in THIS batch.
       // Subsequent ensures targeting these paths must still emit so
       // the leaf set has a parent to land on. The "" sentinel marks
@@ -1827,6 +1836,11 @@ export class BackendAdapter implements ModelAdapter {
       };
 
       for (const { op: o, innerSegments } of columnOps) {
+        if (o.op === "add" || o.op === "replace" || o.op === "remove") {
+          rootNull =
+            innerSegments.length === 0 &&
+            (o.op === "remove" || (o as any).value === null);
+        }
         switch (o.op) {
           case "add": {
             if (innerSegments[innerSegments.length - 1] === "-") {
@@ -1948,7 +1962,10 @@ export class BackendAdapter implements ModelAdapter {
         }
       }
 
-      updateFields[column] = this.write.raw(sql, bindings);
+      updateFields[column] =
+        rootNull && column !== "data"
+          ? null
+          : this.write.raw(sql, bindings);
     }
 
     // Heal legacy `data` overflow: strip any schema-known keys we just
