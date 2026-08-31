@@ -185,6 +185,7 @@ export class SocketTransport extends EventEmitter implements Transport {
   private suspendedCalls = new Map<string, PendingCall>();
   private suspendGraceTimer: ReturnType<typeof setTimeout> | null = null;
   private suspendError: Error | null = null;
+  private suspendUserId: string | null = null;
   private pendingWaiters = new Set<PendingWaiter>();
   private handshakeTimeout: number;
   private sessionGeneration = 0;
@@ -646,6 +647,7 @@ export class SocketTransport extends EventEmitter implements Transport {
   private _suspendPendingCalls(error: Error): void {
     if (this.pendingCalls.size === 0) return;
     this.suspendError = error;
+    this.suspendUserId = this.session.state.userId;
     for (const [id, call] of this.pendingCalls) {
       this.suspendedCalls.set(id, call);
     }
@@ -666,6 +668,16 @@ export class SocketTransport extends EventEmitter implements Transport {
       this.suspendGraceTimer = null;
     }
     if (this.suspendedCalls.size === 0) return;
+    // The calls were issued for the identity that held the session
+    // when the socket dropped. If the reconnect hello resolved a
+    // different user, executing them now would attribute another
+    // person's actions to the new session; fail them instead.
+    if (this.session.state.userId !== this.suspendUserId) {
+      this._rejectSuspended(
+        this.suspendError ?? new Error("Disconnected"),
+      );
+      return;
+    }
     const calls = [...this.suspendedCalls.entries()];
     this.suspendedCalls.clear();
     for (const [id, call] of calls) {

@@ -1322,7 +1322,15 @@ export function createApp(config: AppConfig): ParcaeApp {
             if (method.toUpperCase() !== "GET") {
               const owner = sessionSnapshot.session?.user?.id ?? "anon";
               const callKey = `parcae:rpc-once:${owner}:${String(requestId).slice(0, 64)}`;
-              const fresh = await pubsub.tryLock(callKey, 300_000);
+              // Fail open on a slow or dead Redis: a hung SET here
+              // would stall every socket mutation, which is worse
+              // than briefly losing replay protection.
+              const fresh = await Promise.race([
+                pubsub.tryLock(callKey, 300_000).catch(() => true),
+                new Promise<boolean>((resolve) =>
+                  setTimeout(() => resolve(true), 500),
+                ),
+              ]);
               if (!fresh) {
                 const replayed = createSocketFakeRes(socket, requestId);
                 replayed.writeHead(409);

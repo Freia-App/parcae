@@ -677,6 +677,34 @@ describe("SocketTransport — hello/resync protocol", () => {
     }
   });
 
+  it("rejects a suspended RPC instead of re-sending it when the reconnect resolves a different user", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = makeTransport(async () => "token");
+      currentSocket.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      ackHello("user-1");
+      await vi.advanceTimersByTimeAsync(0);
+
+      const call = transport.post("/notes", { text: "mine" });
+      const rejection = expect(call).rejects.toThrow("Disconnected");
+      await vi.advanceTimersByTimeAsync(0);
+
+      currentSocket.disconnect();
+      currentSocket.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      ackHello("user-2");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(
+        currentSocket.emits.filter((entry) => entry.event === "call"),
+      ).toHaveLength(1);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects an RPC when a fresh session generation starts", async () => {
     const transport = makeTransport(async () => "token");
     currentSocket.connect();
