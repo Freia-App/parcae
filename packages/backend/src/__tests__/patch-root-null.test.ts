@@ -86,6 +86,9 @@ function createKnexStub() {
       const last = [...updates].reverse().find((u) => column in u.fields);
       return last ? last.fields[column] : undefined;
     },
+    setRow(row: Record<string, any>) {
+      currentRow = { ...row };
+    },
   };
 }
 
@@ -98,7 +101,9 @@ const ResultModel: any = {
     title: "string",
   },
   hydrate(_adapter: BackendAdapter, data: Record<string, any>) {
-    return { __data: data };
+    const m: any = { ...data, __data: data };
+    m.constructor = ResultModel;
+    return m;
   },
 };
 
@@ -183,5 +188,61 @@ describe("BackendAdapter._patchPostgres — root clears write SQL NULL", () => {
     expect(field).not.toBeNull();
     expect(field.sql).toContain("?::jsonb");
     expect(field.bindings).toContain(JSON.stringify({ a: 1 }));
+  });
+});
+
+describe("saveDiff — a nullish pair is not a change", () => {
+  let adapter: BackendAdapter;
+  let stub: ReturnType<typeof createKnexStub>;
+
+  beforeEach(() => {
+    clearHooks();
+    stub = createKnexStub();
+    adapter = new BackendAdapter({ read: stub.knex, write: stub.knex });
+    adapter.engine = "postgres";
+  });
+
+  afterEach(() => {
+    clearHooks();
+  });
+
+  function makeSaveModel(snapshot: Record<string, any>, data: Record<string, any>): any {
+    const m = Object.create(ResultModel.prototype ?? {});
+    m.constructor = ResultModel;
+    m.id = "p1";
+    m.__isNew = false;
+    m.__serverSnapshot = snapshot;
+    m.__data = data;
+    return m;
+  }
+
+  it("does not re-clear a column the snapshot holds as null and the instance omits", async () => {
+    await adapter.save(
+      makeSaveModel(
+        { id: "p1", valueCompound: null, metadata: {}, title: "a", data: {} },
+        { id: "p1", metadata: {}, title: "b", data: {} },
+      ),
+    );
+    expect(stub.lastFieldFor("title")).toBe("b");
+    expect(stub.lastFieldFor("valueCompound")).toBeUndefined();
+  });
+
+  it("still nulls a column the snapshot holds non-null and the instance cleared", async () => {
+    stub.setRow({
+      id: "p1",
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+      valueCompound: { sys: 120 },
+      metadata: {},
+      title: "a",
+      data: {},
+    });
+    await adapter.save(
+      makeSaveModel(
+        { id: "p1", valueCompound: { sys: 120 }, metadata: {}, title: "a", data: {} },
+        { id: "p1", metadata: {}, title: "a", data: {} },
+      ),
+    );
+    expect(stub.lastFieldFor("valueCompound")).toBeNull();
   });
 });

@@ -252,6 +252,11 @@ function saveDiff(
   for (const [field, column] of Object.entries(patchSchema)) {
     const previous = state[field];
     const next = current[field];
+    // A hydrated snapshot surfaces an unset column as null while an
+    // instance that never touched the field carries undefined. Both
+    // mean "no value" for a declared column, so a nullish pair is not
+    // a change; without this every save re-clears the column.
+    if (previous == null && next == null) continue;
     if (equal(previous, next, { strict: true })) continue;
     if (resolveColType(column) === "json") {
       if (previous === undefined) {
