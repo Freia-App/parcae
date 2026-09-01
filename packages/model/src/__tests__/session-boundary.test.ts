@@ -55,13 +55,20 @@ describe("sessionBoundaryOf", () => {
     ).toBe("changed");
   });
 
+  // A server deployed before the codes existed is the peer a client
+  // meets mid-rolling-deploy, and its prefixed wording is the only
+  // not-reconciled refusal a REST call can receive from it.
+  it("classifies a pre-codes server's prefixed refusal", () => {
+    expect(
+      sessionBoundaryOf({ message: "Socket session is not reconciled" }),
+    ).toBe("notReconciled");
+  });
+
   it("returns null for anything else", () => {
     expect(sessionBoundaryOf(new Error("RPC timeout: GET /posts"))).toBeNull();
     expect(sessionBoundaryOf("Session terminated")).toBeNull();
     expect(sessionBoundaryOf(null)).toBeNull();
     expect(sessionBoundaryOf(undefined)).toBeNull();
-    expect(
-      sessionBoundaryOf({ message: "Socket session is not reconciled" }),
-    ).toBeNull();
+    expect(sessionBoundaryOf({ message: "Resync failed" })).toBeNull();
   });
 });

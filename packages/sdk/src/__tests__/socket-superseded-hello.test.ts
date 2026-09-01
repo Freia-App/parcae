@@ -333,6 +333,28 @@ describe("SocketTransport — REST calls across a superseded hello", () => {
     expect(callEmits()).toHaveLength(0);
   });
 
+  it("a parked call rejects on termination even when a fresh handshake is already racing it", async () => {
+    const transport = makeTransport(async () => "token");
+    currentSocket.connect();
+    await flush();
+
+    const call = transport.get("/posts");
+    await flush();
+
+    // Sign-out lands, and a reconnect installs a new handshake in the
+    // same tick. Following that one would put the call on the wire
+    // under a session the user has ended.
+    const termination = transport.terminateSession();
+    currentSocket.disconnect();
+    currentSocket.connect();
+    await flush();
+
+    await expect(call).rejects.toThrow("Session terminated");
+    expect(callEmits()).toHaveLength(0);
+    ackHello(null);
+    await termination.catch(() => {});
+  });
+
   it("a disconnect during a refresh-suspended call re-sends the frame after the reconnect hello", async () => {
     const transport = makeTransport(async () => "token");
     currentSocket.connect();

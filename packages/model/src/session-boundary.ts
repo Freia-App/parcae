@@ -39,6 +39,13 @@ export function isSessionBoundaryError(message: string): boolean {
 /**
  * Which boundary an error marks, or null when it marks none. Takes
  * anything a catch block can hand it.
+ *
+ * The message pass folds case. A server deployed before the codes
+ * existed prefixes its refusal ("Socket session is not reconciled"),
+ * and during a rolling deploy that peer is answering a client that
+ * already classifies by code. A case-sensitive test would read that
+ * refusal as an ordinary error and let a caller retry it, which is the
+ * fail-open the whole table exists to prevent.
  */
 export function sessionBoundaryOf(error: unknown): SessionBoundary | null {
   if (typeof error !== "object" || error === null) return null;
@@ -47,8 +54,9 @@ export function sessionBoundaryOf(error: unknown): SessionBoundary | null {
     if (code === SESSION_BOUNDARY_CODES[kind]) return kind;
   }
   if (typeof message !== "string") return null;
+  const lower = message.toLowerCase();
   for (const kind of Object.keys(SESSION_BOUNDARY_ERRORS) as SessionBoundary[]) {
-    if (message.includes(SESSION_BOUNDARY_ERRORS[kind])) return kind;
+    if (lower.includes(SESSION_BOUNDARY_ERRORS[kind].toLowerCase())) return kind;
   }
   return null;
 }
