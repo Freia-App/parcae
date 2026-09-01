@@ -4,6 +4,7 @@ import {
   ensureIntermediates,
   generateId,
   Model,
+  pathsOverlap,
   SESSION_BOUNDARY_ERRORS,
   serializeLazyQueryArgs,
   SYM_SERVER_MERGE,
@@ -380,10 +381,6 @@ type QueryOp =
   | { op: "remove"; id: string }
   | { op: "update"; id: string; patch: Operation[] };
 
-function pathsOverlap(a: string, b: string): boolean {
-  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
-}
-
 interface QueryEnvelope {
   ops: QueryOp[];
   order?: string[];
@@ -490,6 +487,15 @@ function applyOps(
     }
     if (!existing) continue;
 
+    if (typeof existing[SYM_SERVER_PATCH] === "function") {
+      // A Model filters the frame itself, and needs the ops it skips: they
+      // still move the baseline the next frame is diffed against.
+      const previousVersion = existing[SYM_VERSION];
+      existing[SYM_SERVER_PATCH](patches);
+      if (existing[SYM_VERSION] !== previousVersion) didUpdate = true;
+      continue;
+    }
+
     const pendingPaths: ReadonlySet<string> | undefined = existing.__patchingPaths;
     const filtered = pendingPaths?.size
       ? patches.filter((patch) => {
@@ -502,15 +508,11 @@ function applyOps(
 
     if (filtered.length === 0) continue;
 
-    if (typeof existing[SYM_SERVER_PATCH] === "function") {
-      existing[SYM_SERVER_PATCH](filtered);
-    } else {
-      const snapshot = structuredClone(existing.__data ?? {});
-      ensureIntermediates(snapshot, filtered);
-      applyPatch(snapshot, filtered, false, true);
-      for (const [k, v] of Object.entries(snapshot)) {
-        existing[k] = v;
-      }
+    const snapshot = structuredClone(existing.__data ?? {});
+    ensureIntermediates(snapshot, filtered);
+    applyPatch(snapshot, filtered, false, true);
+    for (const [k, v] of Object.entries(snapshot)) {
+      existing[k] = v;
     }
     didUpdate = true;
   }
@@ -556,7 +558,9 @@ function applyOps(
 
     if (optimistic) {
       if (typeof optimistic[SYM_SERVER_MERGE] === "function") {
-        result.push(optimistic[SYM_SERVER_MERGE](data));
+        // Hydrating first makes this a full-row merge, which resets the
+        // baseline the subscription's next frame is diffed against.
+        result.push(optimistic[SYM_SERVER_MERGE](modelClass.hydrate(adapter, data)));
       } else {
         result.push(modelClass.hydrate(adapter, data));
       }

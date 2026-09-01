@@ -99,4 +99,39 @@ describe("useQuery — subscription echo after the client's own save", () => {
     expect(entry.items[0].rules.inHours).toEqual([rule]);
     release();
   });
+
+  it("diffs later frames against the add frame's row for an optimistic create", async () => {
+    const client = new FakeClient();
+    const { entry, release } = await primeCache(client, "h-add");
+    const local = Setting.hydrate(adapter, {
+      id: "s2",
+      tmp: "tmp-2",
+      rules: { inHours: [] },
+    });
+    entry.optimistic.push(local);
+
+    // The server's row carries a field the client never wrote; the next
+    // frame is diffed against that row, so it must become the baseline.
+    client.emitQueryOps("h-add", [
+      {
+        op: "add",
+        id: "s2",
+        data: { id: "s2", tmp: "tmp-2", rules: { inHours: [] }, status: "active" },
+      },
+    ]);
+    expect(entry.items[1]).toBe(local);
+    expect((local as any).status).toBe("active");
+
+    client.emitQueryOps("h-add", [
+      {
+        op: "update",
+        id: "s2",
+        patch: [{ op: "replace", path: "/rules", value: { inHours: [] , afterHours: [] } }],
+      },
+    ]);
+
+    expect((local as any).status).toBe("active");
+    expect(local.rules).toEqual({ inHours: [], afterHours: [] });
+    release();
+  });
 });

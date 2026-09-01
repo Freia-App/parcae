@@ -23,11 +23,20 @@
  *                     behaviour, but computed on demand rather than
  *                     observed incrementally through a write trap.
  *
- * `__serverSnapshot` is the one piece of new state: a plain object holding
- * the last server-authoritative view of the document. It's set on
- * construction (from the fetch/create payload), refreshed by
- * `SYM_SERVER_MERGE` on server-initiated updates, and reapplied after
- * save() / patch() acks.
+ * `__serverSnapshot` is a plain object holding the last server-authoritative
+ * view of the document. It's set on construction (from the fetch/create
+ * payload), refreshed by `SYM_SERVER_MERGE` on server-initiated updates, and
+ * reapplied after save() / patch() acks. flush() diffs against it, and it is
+ * the baseline for replaying local edits over a server row.
+ *
+ * A second, subscription-only snapshot sits beside it, because the two answer
+ * different questions. The backend computes each realtime frame as a diff
+ * against the row as that subscription last described it, so a frame can only
+ * be applied to that same baseline. `__serverSnapshot` races ahead of it the
+ * moment a save() or patch() ack lands, and applying an `add` op to the
+ * advanced snapshot inserts an array element the ack already delivered. The
+ * subscription snapshot therefore moves with subscription frames and full
+ * subscription rows only, never with the client's own write acks.
  *
  * `"operations"` synchronously reports staged, patched, and effective remote
  * RFC 6902 changes with the current model revision. Direct field writes do
@@ -79,6 +88,10 @@ const SYM_ADAPTER = Symbol("parcae:adapter");
 const SYM_PATCHING = Symbol("parcae:patching");
 /** The last-known server-authoritative snapshot of this document. Refreshed on construction, save/patch ack, and SYM_SERVER_MERGE. flush() diffs against this. */
 const SYM_SNAPSHOT = Symbol("parcae:serverSnapshot");
+/** The row as the subscription last described it. Backend frames are diffed against exactly this, so it advances only with subscription frames and full subscription rows, never with the client's own write acks. */
+const SYM_SUBSCRIPTION_SNAPSHOT = Symbol("parcae:subscriptionSnapshot");
+/** The outbound payload of the save currently in flight. The baseline for replaying local edits while the server has not seen that payload yet. */
+const SYM_PENDING_SAVE = Symbol("parcae:pendingSave");
 /** Temporary staging for constructor-provided data until subclass field initializers finish running. Consumed and deleted by the static factories via _apply(). */
 const SYM_PENDING_DATA = Symbol("parcae:pendingData");
 /** Tail of the instance's single save/patch/flush write lane. */
@@ -525,6 +538,15 @@ function rawReferenceId(value: unknown): string | null {
   return null;
 }
 
+/**
+ * True when two RFC 6902 pointers address the same node or one contains the
+ * other. A server echo of a path the client is still writing must not be
+ * applied over the in-flight local value.
+ */
+export function pathsOverlap(a: string, b: string): boolean {
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
 function mergeServerWithLocalChanges(
   serverData: Record<string, any>,
   baselineData: Record<string, any>,
@@ -579,6 +601,8 @@ export class Model extends EventEmitter {
   declare [SYM_ADAPTER]: ModelAdapter;
   declare [SYM_PATCHING]: Map<string, number>;
   declare [SYM_SNAPSHOT]: Record<string, any>;
+  declare [SYM_SUBSCRIPTION_SNAPSHOT]: Record<string, any>;
+  declare [SYM_PENDING_SAVE]: Record<string, any> | undefined;
   declare [SYM_PENDING_DATA]: Record<string, any> | undefined;
   declare [SYM_WRITE_LANE]: Promise<void> | null | undefined;
   declare [SYM_REF_FIELDS]: Set<string>;
@@ -862,6 +886,7 @@ export class Model extends EventEmitter {
     this[SYM_ADAPTER] = adapter;
     this[SYM_PATCHING] = new Map<string, number>();
     this[SYM_SNAPSHOT] = {};
+    this[SYM_SUBSCRIPTION_SNAPSHOT] = {};
     this[SYM_REF_FIELDS] = new Set();
     (this as any)[SYM_VERSION] = 0;
     if (data) this[SYM_PENDING_DATA] = data;
@@ -963,6 +988,7 @@ export class Model extends EventEmitter {
     // contents don't matter until after the first save ack refreshes
     // it. For hydrate() the snapshot correctly mirrors the server.
     this[SYM_SNAPSHOT] = structuredClone(this.__data);
+    this[SYM_SUBSCRIPTION_SNAPSHOT] = structuredClone(this.__data);
   }
 
   /** Keep an expanded object or raw id on the field and expose its raw id at `$field`. */
@@ -1205,6 +1231,10 @@ export class Model extends EventEmitter {
     this.__savingCount++;
     this.emit("saving", this);
     this.emit("__saving", this.__savingCount);
+    // A server frame arriving mid-save carries the payload's own changes.
+    // Edits the server has not seen are the ones made since the payload was
+    // captured, so that payload is the baseline until the ack replaces it.
+    this[SYM_PENDING_SAVE] = data;
     try {
       const serverData = await this[SYM_ADAPTER].save(this, data);
       if (serverData) {
@@ -1215,6 +1245,7 @@ export class Model extends EventEmitter {
       this.__isNew = false;
       this.emit("saved", this);
     } finally {
+      this[SYM_PENDING_SAVE] = undefined;
       this.__savingCount = Math.max(0, this.__savingCount - 1);
       this.emit("__saving", this.__savingCount);
     }
@@ -1408,7 +1439,7 @@ export class Model extends EventEmitter {
     const currentData = this.__data;
     const mergedData = mergeServerWithLocalChanges(
       authoritativeData,
-      expectedData ?? this[SYM_SNAPSHOT],
+      expectedData ?? this[SYM_PENDING_SAVE] ?? this[SYM_SNAPSHOT],
       currentData,
     );
     const mergedKeys = new Set(Object.keys(mergedData));
@@ -1509,6 +1540,12 @@ export class Model extends EventEmitter {
     }
     for (const field of removedFields ?? []) snapshot[field] = null;
 
+    // A hydrated source is a full row off the wire (query result, resync, add
+    // frame), which is what the subscription will diff its next frame against.
+    if (sourceModel) {
+      this[SYM_SUBSCRIPTION_SNAPSHOT] = structuredClone(snapshot);
+    }
+
     if (didChange) {
       (this as any)[SYM_VERSION] = (this as any)[SYM_VERSION] + 1;
       if (previousEffectiveData) {
@@ -1525,8 +1562,19 @@ export class Model extends EventEmitter {
   }
 
   [SYM_SERVER_PATCH](ops: readonly PatchOp[]): this {
+    // Every outer op, echoes of in-flight writes included: the baseline the
+    // next frame is diffed against advances with all of them.
     const outerOps: PatchOp[] = [];
+    // The outer ops actually merged onto the instance.
+    const mergeOps: PatchOp[] = [];
     const refOps = new Map<string, PatchOp[]>();
+    const pendingPaths = this.__patchingPaths;
+    const isEcho = (path: string): boolean => {
+      for (const pending of pendingPaths) {
+        if (pathsOverlap(path, pending)) return true;
+      }
+      return false;
+    };
 
     for (const op of ops) {
       const segments = pointerSegments(op.path);
@@ -1539,8 +1587,10 @@ export class Model extends EventEmitter {
       const fromSegments = from ? pointerSegments(from) : null;
       if (!isNestedRef || (fromSegments && fromSegments[0] !== segments[0])) {
         outerOps.push(op);
+        if (!isEcho(op.path)) mergeOps.push(op);
         continue;
       }
+      if (isEcho(op.path)) continue;
       const pathStart = op.path.indexOf("/", 1);
       const relative = {
         ...op,
@@ -1591,11 +1641,13 @@ export class Model extends EventEmitter {
     }
 
     const previousVersion = this[SYM_VERSION];
-    if (outerOps.length > 0) {
-      const snapshot = structuredClone(this[SYM_SNAPSHOT]);
+    if (mergeOps.length > 0) {
+      // The frame is a diff against the row as the subscription last
+      // described it, so it only composes with that same baseline.
+      const snapshot = structuredClone(this[SYM_SUBSCRIPTION_SNAPSHOT]);
       const removedValueFields = new Set<string>();
       const removedRawFields = new Set<string>();
-      for (const op of outerOps) {
+      for (const op of mergeOps) {
         const segments = pointerSegments(op.path);
         if (op.op !== "remove" || segments.length !== 1) continue;
         const field = segments[0]!;
@@ -1609,10 +1661,10 @@ export class Model extends EventEmitter {
         [...removedValueFields].filter((field) => removedRawFields.has(field)),
       );
       for (const field of this[SYM_REF_FIELDS]) {
-        const hasRawPatch = outerOps.some(
+        const hasRawPatch = mergeOps.some(
           (op) => pointerSegments(op.path)[0] === `$${field}`,
         );
-        const clearsExpandedField = outerOps.some((op) => {
+        const clearsExpandedField = mergeOps.some((op) => {
           const segments = pointerSegments(op.path);
           if (segments.length !== 1 || segments[0] !== field) return false;
           if (op.op === "remove") return true;
@@ -1622,12 +1674,27 @@ export class Model extends EventEmitter {
           snapshot[`$${field}`] = (this as any)[`$${field}`];
         }
       }
-      ensureIntermediates(snapshot, outerOps);
-      applyPatch(snapshot, outerOps, false, true);
+      ensureIntermediates(snapshot, mergeOps);
+      applyPatch(snapshot, mergeOps, false, true);
       for (const field of removedValueFields) {
         if (!removedFields.has(field)) snapshot[field] = null;
       }
       this[SYM_SERVER_MERGE](snapshot, undefined, removedFields);
+    }
+    if (outerOps.length > 0) {
+      if (mergeOps.length === outerOps.length) {
+        // The merge already wrote base plus every op into the server
+        // snapshot, in raw-id form and without the `$` keys.
+        this[SYM_SUBSCRIPTION_SNAPSHOT] = structuredClone(this[SYM_SNAPSHOT]);
+      } else {
+        const baseline = structuredClone(this[SYM_SUBSCRIPTION_SNAPSHOT]);
+        ensureIntermediates(baseline, outerOps);
+        applyPatch(baseline, outerOps, false, true);
+        for (const key of Object.keys(baseline)) {
+          if (key.startsWith("$")) delete baseline[key];
+        }
+        this[SYM_SUBSCRIPTION_SNAPSHOT] = baseline;
+      }
     }
     if (didRefChange) {
       if (this[SYM_VERSION] === previousVersion) {
