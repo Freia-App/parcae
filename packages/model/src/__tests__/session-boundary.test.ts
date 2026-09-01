@@ -64,9 +64,20 @@ describe("sessionBoundaryOf", () => {
     ).toBe("notReconciled");
   });
 
+  // A caller that narrowed the rejection to its text before asking must
+  // still classify. Reading a boundary as an ordinary error is the
+  // fail-open this table exists to prevent, so a bare string is answered
+  // rather than refused.
+  it("classifies a bare message string", () => {
+    expect(sessionBoundaryOf("Session terminated")).toBe("terminated");
+    expect(sessionBoundaryOf("Socket session is not reconciled")).toBe(
+      "notReconciled",
+    );
+    expect(sessionBoundaryOf("RPC timeout: GET /posts")).toBeNull();
+  });
+
   it("returns null for anything else", () => {
     expect(sessionBoundaryOf(new Error("RPC timeout: GET /posts"))).toBeNull();
-    expect(sessionBoundaryOf("Session terminated")).toBeNull();
     expect(sessionBoundaryOf(null)).toBeNull();
     expect(sessionBoundaryOf(undefined)).toBeNull();
     expect(sessionBoundaryOf({ message: "Resync failed" })).toBeNull();
