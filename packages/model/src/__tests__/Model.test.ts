@@ -1767,3 +1767,108 @@ describe("Model", () => {
     });
   });
 });
+
+// The backend diffs each subscription frame against the row as that
+// subscription last described it. A client's own save or patch ack moves
+// __serverSnapshot ahead of that baseline, so applying the frame to the
+// snapshot re-inserts array elements the ack already delivered.
+describe("subscription frames around the client's own writes", () => {
+  const adapter = createMockAdapter();
+  const rule = {
+    destination: "reception",
+    label: "Reception",
+    number: "+61255501234",
+  };
+  // Postgres returns jsonb keys ordered by length then name, so the echo
+  // carries the same rule with its keys in a different order.
+  const echoedRule = {
+    label: "Reception",
+    number: "+61255501234",
+    destination: "reception",
+  };
+
+  it("does not duplicate an array element when the subscription echo lands after the save ack", async () => {
+    const post = Post.hydrate(adapter, { id: "p1", rules: { inHours: [] } });
+    (post as any).rules = { inHours: [rule] };
+    await post.save();
+
+    post[SYM_SERVER_PATCH]([
+      { op: "add", path: "/rules/inHours/0", value: echoedRule },
+    ]);
+
+    expect((post as any).rules.inHours).toEqual([rule]);
+    expect(post.__serverSnapshot.rules.inHours).toEqual([rule]);
+  });
+
+  it("does not duplicate an array element when the subscription echo lands before the save ack", async () => {
+    const originalSave = adapter.save;
+    const gate = deferred<void>();
+    adapter.save = async (_model, data) => {
+      await gate.promise;
+      return structuredClone(data);
+    };
+    try {
+      const post = Post.hydrate(adapter, { id: "p1", rules: { inHours: [] } });
+      (post as any).rules = { inHours: [rule] };
+      const saving = post.save();
+
+      post[SYM_SERVER_PATCH]([
+        { op: "add", path: "/rules/inHours/0", value: echoedRule },
+      ]);
+      expect((post as any).rules.inHours).toEqual([rule]);
+
+      gate.resolve();
+      await saving;
+      expect((post as any).rules.inHours).toEqual([rule]);
+    } finally {
+      adapter.save = originalSave;
+    }
+  });
+
+  it("does not duplicate an array element when the subscription echo lands after the patch ack", async () => {
+    const post = Post.hydrate(adapter, { id: "p1", tags: ["a"] });
+    await post.patch([{ op: "add", path: "/tags/-", value: "b" }]);
+
+    post[SYM_SERVER_PATCH]([{ op: "add", path: "/tags/1", value: "b" }]);
+
+    expect((post as any).tags).toEqual(["a", "b"]);
+  });
+
+  it("keeps the subscription baseline moving through ops skipped for in-flight paths", async () => {
+    const originalPatch = adapter.patch;
+    const gate = deferred<void>();
+    // The ack carries the row as the server holds it, which by then
+    // already includes the views bump the frame below announced.
+    adapter.patch = async (_model, _ops, data) => {
+      await gate.promise;
+      return { ...structuredClone(data), views: 5 };
+    };
+    try {
+      const post = Post.hydrate(adapter, {
+        id: "p1",
+        title: "start",
+        views: 0,
+      });
+      const writing = post.patch([
+        { op: "replace", path: "/title", value: "first" },
+      ]);
+      // The echo of the in-flight title write is skipped for the merge but
+      // still moves the baseline the next frame is diffed against.
+      post[SYM_SERVER_PATCH]([
+        { op: "replace", path: "/title", value: "first" },
+        { op: "replace", path: "/views", value: 5 },
+      ]);
+      expect(post.title).toBe("first");
+      expect(post.views).toBe(5);
+
+      gate.resolve();
+      await writing;
+
+      post[SYM_SERVER_PATCH]([{ op: "replace", path: "/views", value: 6 }]);
+      expect(post.title).toBe("first");
+      expect(post.views).toBe(6);
+    } finally {
+      adapter.patch = originalPatch;
+    }
+  });
+});
