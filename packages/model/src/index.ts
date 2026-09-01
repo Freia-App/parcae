@@ -63,6 +63,10 @@ export type {
 } from "./adapters/types";
 
 export {
+  SESSION_BOUNDARY_CODES,
   SESSION_BOUNDARY_ERRORS,
   isSessionBoundaryError,
+  sessionBoundaryOf,
+  sessionBoundaryRefusal,
 } from "./session-boundary";
+export type { SessionBoundary } from "./session-boundary";

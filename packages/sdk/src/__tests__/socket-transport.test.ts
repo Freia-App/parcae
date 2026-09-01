@@ -705,7 +705,7 @@ describe("SocketTransport — hello/resync protocol", () => {
     }
   });
 
-  it("rejects an RPC when a fresh session generation starts", async () => {
+  it("rejects an RPC when a fresh session generation resolves a different user", async () => {
     const transport = makeTransport(async () => "token");
     currentSocket.connect();
     await Promise.resolve();
@@ -714,13 +714,26 @@ describe("SocketTransport — hello/resync protocol", () => {
 
     const call = transport.get("/posts");
     await Promise.resolve();
-    const rejection = expect(call).rejects.toThrow("Hello superseded");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(
+      currentSocket.emits.filter((entry) => entry.event === "call"),
+    ).toHaveLength(1);
+
     const refresh = transport.refreshSession();
-    await rejection;
     await Promise.resolve();
     await Promise.resolve();
     ackHello("user-2");
     await refresh;
+
+    // The call belonged to user-1; the new identity must neither
+    // resolve it nor replay its frame. The rejection carries the
+    // suspension's own error, which is how the identity guard reports
+    // a frame it refused to resume.
+    await expect(call).rejects.toThrow("Hello superseded");
+    expect(
+      currentSocket.emits.filter((entry) => entry.event === "call"),
+    ).toHaveLength(1);
   });
 
   it("forwards application socket errors without rejecting unrelated RPCs", async () => {
