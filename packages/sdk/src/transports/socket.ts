@@ -25,7 +25,7 @@ import { decompress } from "compress-json";
 import { EventEmitter } from "eventemitter3";
 import ShortId from "short-unique-id";
 import type { Transport, RequestOptions } from "@parcae/model";
-import { SESSION_BOUNDARY_ERRORS } from "@parcae/model";
+import { SESSION_BOUNDARY_CODES, SESSION_BOUNDARY_ERRORS } from "@parcae/model";
 import { SessionMachine } from "../session-machine";
 import { ConnectionMachine } from "../connection-machine";
 import { log } from "../log";
@@ -183,6 +183,13 @@ export class SocketTransport extends EventEmitter implements Transport {
    * RESEND_GRACE_MS the calls reject with the disconnect error.
    */
   private suspendedCalls = new Map<string, PendingCall>();
+  /**
+   * False means the socket carrying the suspended frames never
+   * dropped, so the server still owes a response to the frames as
+   * sent and they must not go out again. True means the socket dropped
+   * under them and the frames died with it.
+   */
+  private suspendedNeedResend = false;
   private suspendGraceTimer: ReturnType<typeof setTimeout> | null = null;
   private suspendError: Error | null = null;
   private suspendUserId: string | null = null;
@@ -519,7 +526,14 @@ export class SocketTransport extends EventEmitter implements Transport {
     ) {
       return this.helloReady;
     }
-    if (fresh) this._advanceGeneration(new Error("Hello superseded"));
+    if (fresh) {
+      const superseded = new Error("Hello superseded");
+      // The socket is untouched, so frames already sent under the old
+      // generation are still answerable. Park them rather than reject
+      // them, and let the new hello decide their fate.
+      this._suspendPendingCalls(superseded);
+      this._advanceGeneration(superseded);
+    }
     const generation = this.sessionGeneration;
     this.helloGeneration = generation;
     this.helloState = "pending";
@@ -631,6 +645,7 @@ export class SocketTransport extends EventEmitter implements Transport {
       reason ? `Disconnected: ${reason}` : "Disconnected",
     );
     this._suspendPendingCalls(error);
+    if (this.suspendedCalls.size > 0) this.suspendedNeedResend = true;
     this._advanceGeneration(error);
     this.connection.disconnected();
     this.emit("disconnected");
@@ -679,8 +694,18 @@ export class SocketTransport extends EventEmitter implements Transport {
       return;
     }
     const calls = [...this.suspendedCalls.entries()];
+    const needResend = this.suspendedNeedResend;
     this.suspendedCalls.clear();
+    this.suspendedNeedResend = false;
     for (const [id, call] of calls) {
+      // Only a dropped socket loses the frame. Re-emitting one whose
+      // response is still owed would trip the server's replay guard on
+      // a mutation, and restarting `sentAt` would hide a starved call
+      // from the watchdog for another full window.
+      if (!needResend) {
+        this.pendingCalls.set(id, call);
+        continue;
+      }
       call.sentAt = Date.now();
       this.pendingCalls.set(id, call);
       log.debug(
@@ -709,6 +734,7 @@ export class SocketTransport extends EventEmitter implements Transport {
       call.reject(error);
     }
     this.suspendedCalls.clear();
+    this.suspendedNeedResend = false;
     this._scheduleWatchdog();
   }
 
@@ -806,7 +832,10 @@ export class SocketTransport extends EventEmitter implements Transport {
   async terminateSession(): Promise<void> {
     this.confirmedHelloToken = null;
     this.session.terminate();
-    const terminated = new Error(SESSION_BOUNDARY_ERRORS.terminated);
+    const terminated = Object.assign(
+      new Error(SESSION_BOUNDARY_ERRORS.terminated),
+      { code: SESSION_BOUNDARY_CODES.terminated },
+    );
     this._rejectSuspended(terminated);
     this._advanceGeneration(terminated);
     this._scheduleWatchdog();
@@ -851,7 +880,9 @@ export class SocketTransport extends EventEmitter implements Transport {
   private _assertCanRequest(): void {
     if (this.isDisposed) throw new Error("Transport disposed");
     if (this.session.state.status === "terminated") {
-      throw new Error(SESSION_BOUNDARY_ERRORS.terminated);
+      throw Object.assign(new Error(SESSION_BOUNDARY_ERRORS.terminated), {
+        code: SESSION_BOUNDARY_CODES.terminated,
+      });
     }
   }
 
@@ -889,6 +920,54 @@ export class SocketTransport extends EventEmitter implements Transport {
 
   // ── Request/Response ─────────────────────────────────────────────
 
+  /**
+   * Park until a hello resolves, following supersessions instead of
+   * dying with them. A handshake replaced by a newer one has not
+   * failed as far as a parked call is concerned: the call belongs to
+   * whichever generation ends up serving it, and a token rotation
+   * during sign-in supersedes the very first hello. The boundaries
+   * that must still reject are terminal state (`_assertCanRequest`),
+   * a genuine refusal of the handshake we were following, the
+   * caller's own timeout budget, and a change of identity, because a
+   * call issued under one user must never go out under another.
+   */
+  private _awaitHelloReady(deadline: number): Promise<void> {
+    // The settled-and-current case is every call after the first, and
+    // nothing can be superseding it; take the plain await so a request
+    // is not delayed by an extra scheduling hop.
+    if (this.helloState === "resolved") return this.helloReady;
+    return this._followHelloReady(deadline);
+  }
+
+  private async _followHelloReady(deadline: number): Promise<void> {
+    // SessionState is mutated in place, so copy the fields to compare.
+    const parked = { ...this.session.state };
+    let followed = false;
+    for (;;) {
+      const ready = this.helloReady;
+      try {
+        await ready;
+      } catch (error) {
+        this._assertCanRequest();
+        if (this.helloReady !== ready && Date.now() < deadline) {
+          followed = true;
+          continue;
+        }
+        throw error;
+      }
+      if (
+        followed &&
+        parked.status !== "pending" &&
+        this.session.state.userId !== parked.userId
+      ) {
+        throw Object.assign(new Error(SESSION_BOUNDARY_ERRORS.changed), {
+          code: SESSION_BOUNDARY_CODES.changed,
+        });
+      }
+      return;
+    }
+  }
+
   private async fetch(
     method: string,
     path: string,
@@ -897,15 +976,17 @@ export class SocketTransport extends EventEmitter implements Transport {
   ): Promise<any> {
     this._assertCanRequest();
 
+    const deadline = Date.now() + (options?.timeout ?? DEFAULT_TIMEOUT);
+
     // Wait for the first hello to land — guarantees the socket is
     // authenticated before the call goes out. Subsequent calls don't
     // re-await because `helloReady` resolves once and stays resolved
     // until the next reconnect kicks a new handshake.
-    await this.helloReady;
+    await this._awaitHelloReady(deadline);
 
     if (!this.socket.connected) {
       await this._waitForConnection();
-      await this.helloReady;
+      await this._awaitHelloReady(deadline);
     }
 
     this._assertCanRequest();
