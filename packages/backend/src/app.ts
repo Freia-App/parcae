@@ -116,6 +116,13 @@ export interface AppConfig {
   middleware?: Middleware[];
   /** API version prefix. Default: "v1" */
   version?: string;
+  /**
+   * Opaque identifier of the running build, typically the git sha the
+   * image was built from. Reported on `/{version}/health` and in the
+   * socket hello acknowledgement, so a client that reconnects after a
+   * deploy can see the server changed underneath it. Unset: not reported.
+   */
+  build?: string;
   /** Project root directory. Default: process.cwd() */
   root?: string;
   /**
@@ -419,6 +426,7 @@ export function createSocketSessionController(
   socketId: string,
   authAdapter: AuthAdapter | null,
   subscriptions: SocketSessionSubscriptions,
+  build?: string,
 ) {
   const reconciler = new SocketSessionReconciler<AuthSession>();
 
@@ -435,7 +443,7 @@ export function createSocketSessionController(
     invalidate: () => reconciler.invalidate(),
     async hello(
       payload: { token?: string | null } | null | undefined,
-      callback?: (result: { userId: string | null }) => void,
+      callback?: (result: { userId: string | null; build?: string }) => void,
       onBoundary?: () => Promise<void>,
     ): Promise<void> {
       const token = payload?.token ?? null;
@@ -456,7 +464,8 @@ export function createSocketSessionController(
         return null;
       });
       const session = result.applied ? result.session : reconciler.session;
-      callback?.({ userId: session?.user?.id ?? null });
+      const userId = session?.user?.id ?? null;
+      callback?.(build === undefined ? { userId } : { userId, build });
     },
   };
 }
@@ -1004,6 +1013,7 @@ export function createApp(config: AppConfig): ParcaeApp {
             uptime: process.uptime(),
             models: models.length,
             version,
+            ...(config.build ? { build: config.build } : {}),
           }),
         );
       });
@@ -1285,6 +1295,7 @@ export function createApp(config: AppConfig): ParcaeApp {
           socket.id,
           authAdapter,
           subscriptions,
+          config.build,
         );
         const socketRooms = new SocketSessionRoomManager(socket as any);
 

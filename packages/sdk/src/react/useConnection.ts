@@ -13,6 +13,7 @@ const DEFAULT_SNAP: ConnectionState = {
   lastError: null,
   version: 0,
   lastConnectedAt: null,
+  serverBuild: null,
 };
 
 function read(machine: ConnectionMachine | undefined): ConnectionState {
@@ -23,6 +24,7 @@ function read(machine: ConnectionMachine | undefined): ConnectionState {
     lastError: s.lastError,
     version: s.version,
     lastConnectedAt: s.lastConnectedAt,
+    serverBuild: s.serverBuild,
   };
 }
 
@@ -31,6 +33,8 @@ export interface UseConnectionResult {
   isConnected: boolean;
   lastError: Error | null;
   lastConnectedAt: number | null;
+  /** The server's reported build (see ConnectionState.serverBuild). */
+  serverBuild: string | null;
 }
 
 /**
@@ -69,5 +73,6 @@ export function useConnection(): UseConnectionResult {
     isConnected: snap.status === "connected",
     lastError: snap.lastError,
     lastConnectedAt: snap.lastConnectedAt,
+    serverBuild: snap.serverBuild,
   };
 }

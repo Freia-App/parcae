@@ -97,11 +97,11 @@ function makeTransport(getToken: () => Promise<string | null>) {
 }
 
 /** Drain the most recent `hello` emit's callback with a fake server response. */
-function ackHello(userId: string | null): void {
+function ackHello(userId: string | null, build?: string): void {
   const hello = [...currentSocket.emits].reverse().find((e) => e.event === "hello");
   if (!hello) throw new Error("no hello emit found");
   const cb = hello.args[1] as (resp: any) => void;
-  cb({ userId });
+  cb(build === undefined ? { userId } : { userId, build });
 }
 
 function respondToLatestCall(response: Record<string, unknown>): void {
@@ -234,6 +234,44 @@ describe("SocketTransport — hello/resync protocol", () => {
     await Promise.resolve();
     ackHello("u-1");
     expect(onResync).toHaveBeenCalledTimes(2);
+  });
+
+  it("records the server's build from the hello ack on the connection", async () => {
+    const t = makeTransport(async () => "tok");
+    currentSocket.connect();
+    await Promise.resolve();
+    await Promise.resolve();
+    ackHello("u-1", "build-1");
+    expect(t.connection.state.serverBuild).toBe("build-1");
+  });
+
+  it("leaves serverBuild null when the server reports none", async () => {
+    const t = makeTransport(async () => "tok");
+    currentSocket.connect();
+    await Promise.resolve();
+    await Promise.resolve();
+    ackHello("u-1");
+    expect(t.connection.state.serverBuild).toBeNull();
+  });
+
+  it("a reconnect that lands on a newer build updates serverBuild and notifies", async () => {
+    const t = makeTransport(async () => "tok");
+    currentSocket.connect();
+    await Promise.resolve();
+    await Promise.resolve();
+    ackHello("u-1", "build-1");
+    const notify = vi.fn();
+    t.connection.subscribe(notify);
+
+    currentSocket.disconnect();
+    currentSocket.connect();
+    await Promise.resolve();
+    await Promise.resolve();
+    ackHello("u-1", "build-2");
+
+    expect(t.connection.state.serverBuild).toBe("build-2");
+    // disconnected, connected, build changed
+    expect(notify).toHaveBeenCalledTimes(3);
   });
 
   it("refreshSession() re-emits hello and updates the session", async () => {
