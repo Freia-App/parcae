@@ -1834,6 +1834,54 @@ describe("subscription frames around the client's own writes", () => {
     expect((post as any).tags).toEqual(["a", "b"]);
   });
 
+  it("keeps a saved value when a resync lands mid-save carrying the pre-save row", async () => {
+    const originalSave = adapter.save;
+    const gate = deferred<void>();
+    adapter.save = async (_model, data) => {
+      await gate.promise;
+      return structuredClone(data);
+    };
+    try {
+      const post = Post.hydrate(adapter, { id: "p1", title: "old" });
+      post.title = "new";
+      const saving = post.save();
+
+      // A reconnect resyncs the query while the save is in flight, and the
+      // server row it returns predates the save.
+      post[SYM_SERVER_MERGE](Post.hydrate(adapter, { id: "p1", title: "old" }));
+      expect(post.title).toBe("new");
+
+      gate.resolve();
+      await saving;
+      expect(post.title).toBe("new");
+    } finally {
+      adapter.save = originalSave;
+    }
+  });
+
+  it("does not duplicate an appended element when its echo lands before the patch ack", async () => {
+    const originalPatch = adapter.patch;
+    const gate = deferred<void>();
+    adapter.patch = async (_model, _ops, data) => {
+      await gate.promise;
+      return structuredClone(data);
+    };
+    try {
+      const post = Post.hydrate(adapter, { id: "p1", tags: ["a"] });
+      const writing = post.patch([{ op: "add", path: "/tags/-", value: "b" }]);
+
+      // The backend diffs the stored row, so the append comes back indexed.
+      post[SYM_SERVER_PATCH]([{ op: "add", path: "/tags/1", value: "b" }]);
+      expect((post as any).tags).toEqual(["a", "b"]);
+
+      gate.resolve();
+      await writing;
+      expect((post as any).tags).toEqual(["a", "b"]);
+    } finally {
+      adapter.patch = originalPatch;
+    }
+  });
+
   it("keeps the subscription baseline moving through ops skipped for in-flight paths", async () => {
     const originalPatch = adapter.patch;
     const gate = deferred<void>();

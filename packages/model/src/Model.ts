@@ -84,14 +84,12 @@ export function generateId(): string {
 // ─── Symbols for internal state (never collide with data properties) ─────────
 
 const SYM_ADAPTER = Symbol("parcae:adapter");
-/** Full RFC 6902 paths currently in-flight via patch(). Used by SYM_SERVER_MERGE and useQuery to skip server echoes for sub-paths the client just wrote. */
+/** Full RFC 6902 paths currently in-flight via patch() or save(). Used by SYM_SERVER_PATCH and useQuery to skip server echoes for sub-paths the client just wrote. */
 const SYM_PATCHING = Symbol("parcae:patching");
 /** The last-known server-authoritative snapshot of this document. Refreshed on construction, save/patch ack, and SYM_SERVER_MERGE. flush() diffs against this. */
 const SYM_SNAPSHOT = Symbol("parcae:serverSnapshot");
 /** The row as the subscription last described it. Backend frames are diffed against exactly this, so it advances only with subscription frames and full subscription rows, never with the client's own write acks. */
 const SYM_SUBSCRIPTION_SNAPSHOT = Symbol("parcae:subscriptionSnapshot");
-/** The outbound payload of the save currently in flight. The baseline for replaying local edits while the server has not seen that payload yet. */
-const SYM_PENDING_SAVE = Symbol("parcae:pendingSave");
 /** Temporary staging for constructor-provided data until subclass field initializers finish running. Consumed and deleted by the static factories via _apply(). */
 const SYM_PENDING_DATA = Symbol("parcae:pendingData");
 /** Tail of the instance's single save/patch/flush write lane. */
@@ -437,6 +435,17 @@ function pointerSegments(path: string): string[] {
   return path.slice(1).split("/").map(decodePointerSegment);
 }
 
+/**
+ * The path to hold while an op is in flight. An append (`/tags/-`) comes back
+ * from the server as an indexed insert (`/tags/1`), which overlaps the array
+ * but not the append pointer, so an append holds its parent array instead.
+ */
+function pendingPathFor(path: string): string {
+  const cut = path.lastIndexOf("/");
+  if (cut > 0 && path.slice(cut + 1) === "-") return path.slice(0, cut);
+  return path;
+}
+
 function prefixPatchOps(field: string, ops: readonly PatchOp[]): PatchOp[] {
   const prefix = `/${encodePointerSegment(field)}`;
   // boundary: spreading the fast-json-patch discriminated union preserves it.
@@ -602,7 +611,6 @@ export class Model extends EventEmitter {
   declare [SYM_PATCHING]: Map<string, number>;
   declare [SYM_SNAPSHOT]: Record<string, any>;
   declare [SYM_SUBSCRIPTION_SNAPSHOT]: Record<string, any>;
-  declare [SYM_PENDING_SAVE]: Record<string, any> | undefined;
   declare [SYM_PENDING_DATA]: Record<string, any> | undefined;
   declare [SYM_WRITE_LANE]: Promise<void> | null | undefined;
   declare [SYM_REF_FIELDS]: Set<string>;
@@ -1079,7 +1087,7 @@ export class Model extends EventEmitter {
     }
   }
 
-  /** @internal — full RFC 6902 paths currently in-flight via patch() */
+  /** @internal — full RFC 6902 paths currently in-flight via patch() or save() */
   get __patchingPaths(): ReadonlySet<string> {
     return new Set(this[SYM_PATCHING].keys());
   }
@@ -1231,10 +1239,16 @@ export class Model extends EventEmitter {
     this.__savingCount++;
     this.emit("saving", this);
     this.emit("__saving", this.__savingCount);
-    // A server frame arriving mid-save carries the payload's own changes.
-    // Edits the server has not seen are the ones made since the payload was
-    // captured, so that payload is the baseline until the ack replaces it.
-    this[SYM_PENDING_SAVE] = data;
+    // A frame arriving mid-save for a field this payload is writing is an
+    // echo of the payload's own change. Applying it would replay the local
+    // edit on top of the value the server already has, so hold those fields
+    // for the in-flight window and let the ack settle them.
+    const heldPaths: string[] = [];
+    for (const key of Object.keys(data)) {
+      if (SYSTEM_DATA_KEYS.has(key)) continue;
+      heldPaths.push(`/${encodePointerSegment(key)}`);
+    }
+    this._holdPaths(heldPaths);
     try {
       const serverData = await this[SYM_ADAPTER].save(this, data);
       if (serverData) {
@@ -1245,17 +1259,31 @@ export class Model extends EventEmitter {
       this.__isNew = false;
       this.emit("saved", this);
     } finally {
-      this[SYM_PENDING_SAVE] = undefined;
+      this._releasePaths(heldPaths);
       this.__savingCount = Math.max(0, this.__savingCount - 1);
       this.emit("__saving", this.__savingCount);
     }
   }
 
-  private _beginPatch(ops: readonly PatchOp[]): Set<string> {
-    const paths = new Set(ops.map((op) => op.path));
+  /** Mark paths as in-flight so server echoes of them are skipped. */
+  private _holdPaths(paths: Iterable<string>): void {
     for (const path of paths) {
       this[SYM_PATCHING].set(path, (this[SYM_PATCHING].get(path) ?? 0) + 1);
     }
+  }
+
+  /** Release paths held by _holdPaths. Counted, so concurrent writes nest. */
+  private _releasePaths(paths: Iterable<string>): void {
+    for (const path of paths) {
+      const count = this[SYM_PATCHING].get(path) ?? 0;
+      if (count <= 1) this[SYM_PATCHING].delete(path);
+      else this[SYM_PATCHING].set(path, count - 1);
+    }
+  }
+
+  private _beginPatch(ops: readonly PatchOp[]): Set<string> {
+    const paths = new Set(ops.map((op) => pendingPathFor(op.path)));
+    this._holdPaths(paths);
     this.__savingCount++;
     this.emit("patching", this);
     this.emit("__saving", this.__savingCount);
@@ -1263,11 +1291,7 @@ export class Model extends EventEmitter {
   }
 
   private _endPatch(paths: ReadonlySet<string>): void {
-    for (const path of paths) {
-      const count = this[SYM_PATCHING].get(path) ?? 0;
-      if (count <= 1) this[SYM_PATCHING].delete(path);
-      else this[SYM_PATCHING].set(path, count - 1);
-    }
+    this._releasePaths(paths);
     this.__savingCount = Math.max(0, this.__savingCount - 1);
     this.emit("__saving", this.__savingCount);
   }
@@ -1439,7 +1463,7 @@ export class Model extends EventEmitter {
     const currentData = this.__data;
     const mergedData = mergeServerWithLocalChanges(
       authoritativeData,
-      expectedData ?? this[SYM_PENDING_SAVE] ?? this[SYM_SNAPSHOT],
+      expectedData ?? this[SYM_SNAPSHOT],
       currentData,
     );
     const mergedKeys = new Set(Object.keys(mergedData));
