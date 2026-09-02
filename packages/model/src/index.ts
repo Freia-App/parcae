@@ -12,6 +12,7 @@ export {
   generateId,
   isArrayIndexSegment,
   Model,
+  pathsOverlap,
   serializeLazyQueryArgs,
   SYM_EXPANDED_REF,
   SYM_SERVER_MERGE,
