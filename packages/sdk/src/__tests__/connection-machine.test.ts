@@ -45,4 +45,29 @@ describe("ConnectionMachine", () => {
     c.disconnected(err);
     expect(c.state.lastError).toBe(err);
   });
+
+  it("starts with no server build", () => {
+    const c = new ConnectionMachine();
+    expect(c.state.serverBuild).toBeNull();
+  });
+
+  it("serverBuild() records a changed build, bumps version and notifies", () => {
+    const c = new ConnectionMachine();
+    const fn = vi.fn();
+    c.subscribe(fn);
+    c.serverBuild("build-1");
+    expect(c.state.serverBuild).toBe("build-1");
+    expect(c.state.version).toBe(1);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("serverBuild() with the same build is a no-op", () => {
+    const c = new ConnectionMachine();
+    const fn = vi.fn();
+    c.subscribe(fn);
+    c.serverBuild("build-1");
+    c.serverBuild("build-1");
+    expect(c.state.version).toBe(1);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
 });

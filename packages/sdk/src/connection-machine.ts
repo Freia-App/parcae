@@ -26,6 +26,13 @@ export interface ConnectionState {
   version: number;
   /** Wall-clock ms of the most recent `connected` transition. */
   lastConnectedAt: number | null;
+  /**
+   * The build the server reported in its last hello ack (the app's
+   * `build` config), or null before the first ack or when the server
+   * reports none. Changes across a reconnect when the server was
+   * redeployed in between, which is how a client learns of a deploy.
+   */
+  serverBuild: string | null;
 }
 
 export class ConnectionMachine {
@@ -34,6 +41,7 @@ export class ConnectionMachine {
     lastError: null,
     version: 0,
     lastConnectedAt: null,
+    serverBuild: null,
   };
 
   private _listeners = new Set<() => void>();
@@ -56,6 +64,14 @@ export class ConnectionMachine {
 
   disconnected(err: Error | null = null): void {
     this._set("disconnected", err);
+  }
+
+  serverBuild(build: string | null): void {
+    if (this.state.serverBuild === build) return;
+    this.state.serverBuild = build;
+    this.state.version++;
+    log.debug(`connection: server build ${build ?? "unknown"}`);
+    for (const fn of this._listeners) fn();
   }
 
   private _set(status: ConnectionStatus, err: Error | null): void {

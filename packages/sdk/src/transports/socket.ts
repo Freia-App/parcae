@@ -598,6 +598,9 @@ export class SocketTransport extends EventEmitter implements Transport {
           );
           this.lastHelloAckAt = Date.now();
           this.session.resolve(userId);
+          this.connection.serverBuild(
+            typeof response.build === "string" ? response.build : null,
+          );
           this.confirmedHelloToken = token;
           this.sessionReadyForEvents = true;
           this._resendSuspendedCalls();
