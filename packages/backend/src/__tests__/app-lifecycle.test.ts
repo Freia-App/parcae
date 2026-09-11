@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => {
     const queue = {
       building: Promise.resolve(),
       close: vi.fn(async () => {}),
+      forceClose: vi.fn(async () => {}),
       get: vi.fn(() => null),
       queueNameFor: vi.fn((name: string) => `parcae-${name}`),
       createWorker: vi.fn(),
@@ -73,7 +74,12 @@ const mocks = vi.hoisted(() => {
     if (listenError) throw listenError;
   });
 
+  let sharedAdapter: any = null;
   class BackendAdapter {
+    constructor() {
+      if (sharedAdapter) return sharedAdapter;
+      sharedAdapter = this;
+    }
     engine = "postgres";
     modelsByType = new Map<string, any>();
     subscriptions: any = null;
@@ -193,6 +199,18 @@ describe("application lifecycle", () => {
     await expect(createApp({ models: [] }).start()).rejects.toThrow(
       "app startup is one-shot",
     );
+  });
+
+  it("passes stop({ drainTimeoutMs }) through to the queue drain", async () => {
+    const app = createApp({ models: [] });
+    await app.start({ port: 4000 });
+    (mocks.queues[0]!.close as any).mockImplementation(
+      () => new Promise<void>(() => {}),
+    );
+    const started = Date.now();
+    await app.stop({ drainTimeoutMs: 30 });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(mocks.queues[0]!.forceClose).toHaveBeenCalledTimes(1);
   });
 
   it("mounts auth at the exact base path and its wildcard once each", () => {
