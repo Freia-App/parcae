@@ -180,8 +180,15 @@ export interface AppConfig {
 export interface ParcaeApp {
   /** Start the server. */
   start(options?: { dev?: boolean; port?: number }): Promise<void>;
-  /** Stop the server gracefully. */
-  stop(): Promise<void>;
+  /**
+   * Stop the server gracefully. `drainTimeoutMs` caps how long in-flight
+   * BullMQ jobs may run before the workers are force-closed; it defaults
+   * to 8s, which suits a local restart. A container platform that grants
+   * a longer stop window (ECS stopTimeout, up to 120s on Fargate) should
+   * pass most of that window here so a long job finishes on the old task
+   * instead of stalling and re-running on the new one.
+   */
+  stop(options?: { drainTimeoutMs?: number }): Promise<void>;
   /** Resolved model schemas. Available after start(). */
   schemas: Map<string, SchemaDefinition>;
   /** Loaded model constructors. Available after start(). */
@@ -1638,14 +1645,17 @@ export function createApp(config: AppConfig): ParcaeApp {
       });
     },
 
-    async stop() {
+    async stop(options) {
       return serialize(async () => {
         if (state === "idle" || state === "stopped" || state === "failed") {
           return;
         }
         state = "stopping";
         log.info("Shutting down...");
-        await shutdownResources(teardown ?? {});
+        await shutdownResources({
+          ...(teardown ?? {}),
+          drainTimeoutMs: options?.drainTimeoutMs,
+        });
         clearApplicationContext();
         server = null;
         teardown = null;
