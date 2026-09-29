@@ -152,8 +152,10 @@ export function clerk(config: ClerkConfig): AuthAdapter {
     }
 
     // Every Model subclass inherits hydrate(). Unlike Model.create(), this
-    // binds persistence to the adapter captured by setup and marks the model
-    // as an upsert, so concurrent provisioning never duplicates create hooks.
+    // binds persistence to the adapter captured by setup. hydrate() marks
+    // the instance as already persisted, which would make save() update a
+    // row that does not exist, so flag it new: save() then inserts, merging
+    // on id if a concurrent provision got there first.
     const hydratable = localUserModel as ModelConstructor & {
       hydrate(
         adapter: BackendAdapter,
@@ -161,6 +163,7 @@ export function clerk(config: ClerkConfig): AuthAdapter {
       ): Record<string, any>;
     };
     const instance = hydratable.hydrate(localAdapter, { ...userData, id });
+    instance.__isNew = true;
     await localAdapter.save(instance);
     return instance;
   }
