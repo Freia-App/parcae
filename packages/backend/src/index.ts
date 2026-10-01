@@ -19,6 +19,7 @@ export type { Config, RuntimeFlags } from "./config";
 
 // Server
 export { createServer_ } from "./server";
+export type { TrustedOriginCheck } from "./server";
 
 // Adapters
 export { BackendAdapter } from "./adapters/model";

@@ -33,7 +33,11 @@ import {
   resolveRuntimeFlags,
 } from "./config";
 import type { Config, RuntimeFlags } from "./config";
-import { createServer_, listenServer } from "./server";
+import {
+  createServer_,
+  listenServer,
+  type TrustedOriginCheck,
+} from "./server";
 import type { ServerContext } from "./server";
 import {
   getRoutes,
@@ -175,6 +179,20 @@ export interface AppConfig {
    * Integer >= 1; defaults to 10,000. See queryFromClient's doc.
    */
   maxClientQueryLimit?: number;
+  /**
+   * Runtime CORS check, for origins that cannot sit in the static
+   * `TRUSTED_ORIGINS` list because they are added after boot (e.g. a
+   * customer's own domain). Consulted only when the static list does not
+   * already allow the origin, by both the HTTP CORS middleware and the
+   * Socket.IO handshake, so the two always agree.
+   *
+   * Resolve `true` to allow. Any other result, a throw, or a rejection
+   * denies the origin (the error is logged). An allowed origin is echoed
+   * back with credentials allowed, never `*`. Called on every
+   * cross-origin request the static list misses, preflights included, so
+   * keep it fast: cache any database lookup behind it.
+   */
+  isTrustedOrigin?: TrustedOriginCheck;
 }
 
 export interface ParcaeApp {
@@ -849,7 +867,11 @@ export function createApp(config: AppConfig): ParcaeApp {
       }
 
       // ── Step 8: Create server ──────────────────────────────────────
-      server = createServer_({ config: envConfig, version });
+      server = createServer_({
+        config: envConfig,
+        version,
+        isTrustedOrigin: config.isTrustedOrigin,
+      });
       resources.io = server.io;
       resources.httpServer = server.httpServer;
       _setIo(server.io);

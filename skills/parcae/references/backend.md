@@ -42,6 +42,7 @@ await app.start({ port: 3000, dev: true });
 | `modelsPath`             | `string?`                             | Where `reflect.config.json` lives (RTTIST type gen). Auto-detected if unset.   |
 | `onAuthenticatedRequest` | `(req, session, res) => void\|Promise`| Post-auth, pre-dispatch hook. See below.                                        |
 | `maxSubscriptionsPerSocket` | `number?`                          | Default 500. Env `PARCAE_MAX_SUBSCRIPTIONS_PER_SOCKET` overrides.              |
+| `isTrustedOrigin`        | `(origin) => boolean\|Promise<boolean>` | Runtime CORS check, consulted when `TRUSTED_ORIGINS` misses. HTTP + Socket.IO share it. Only `true` allows; throw/reject denies. |
 
 Directory options are **not** auto-defaulted to conventional paths — every directory you want scanned must be passed.
 

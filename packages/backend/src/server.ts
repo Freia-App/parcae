@@ -20,9 +20,20 @@ export interface ServerContext {
   httpServer: ReturnType<typeof createServer>;
 }
 
+/**
+ * Runtime CORS check for origins the static `TRUSTED_ORIGINS` list does not
+ * cover, e.g. customer domains added after boot. Resolve `true` to allow.
+ * Anything else, including a throw or rejection, denies the origin.
+ */
+export type TrustedOriginCheck = (
+  origin: string,
+) => boolean | Promise<boolean>;
+
 export interface ServerOptions {
   config: Config;
   version: string;
+  /** See `AppConfig.isTrustedOrigin`. */
+  isTrustedOrigin?: TrustedOriginCheck;
 }
 
 /**
@@ -59,6 +70,12 @@ export function createServer_(options: ServerOptions): ServerContext {
   const trustedOrigins = config.TRUSTED_ORIGINS
     ? config.TRUSTED_ORIGINS.split(",").map((o) => o.trim())
     : ["http://localhost:*", "https://localhost:*"];
+  // The HTTP middleware and the Socket.IO handshake both ask this one
+  // function, so the two transports cannot disagree about an origin.
+  const allowOrigin = createOriginPolicy(
+    trustedOrigins,
+    options.isTrustedOrigin,
+  );
 
   // Create Polka app with body parsing + query string parsing
   const app = polka({
@@ -106,29 +123,38 @@ export function createServer_(options: ServerOptions): ServerContext {
     next();
   });
 
-  // CORS middleware
+  // CORS middleware. Preflight (OPTIONS) and the real request run the same
+  // check, so a browser never sees a preflight pass that the request fails.
   app.use((req: any, res: any, next: any) => {
     const origin = req.headers.origin;
-    if (origin && isOriginAllowed(origin, trustedOrigins)) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader(
-        "Access-Control-Allow-Methods",
-        "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-      );
-      res.setHeader(
-        "Access-Control-Allow-Headers",
-        "Content-Type, Authorization",
-      );
-      res.setHeader("Access-Control-Allow-Credentials", "true");
-    }
+    const finish = (allowed: boolean) => {
+      if (allowed) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader(
+          "Access-Control-Allow-Methods",
+          "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+        );
+        res.setHeader(
+          "Access-Control-Allow-Headers",
+          "Content-Type, Authorization",
+        );
+        res.setHeader("Access-Control-Allow-Credentials", "true");
+      }
 
-    if (req.method === "OPTIONS") {
-      res.statusCode = 204;
-      res.end();
-      return;
-    }
+      if (req.method === "OPTIONS") {
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
 
-    next();
+      next();
+    };
+
+    if (!origin) return finish(false);
+    // Static-list hits stay synchronous; only a runtime check awaits.
+    const decision = allowOrigin(origin);
+    if (typeof decision === "boolean") return finish(decision);
+    decision.then(finish);
   });
 
   // Create HTTP server from Polka's handler
@@ -139,11 +165,14 @@ export function createServer_(options: ServerOptions): ServerContext {
     path: "/ws",
     cors: {
       origin: (origin, callback) => {
-        if (!origin || isOriginAllowed(origin, trustedOrigins)) {
-          callback(null, true);
-        } else {
-          callback(new Error("Not allowed by CORS"));
-        }
+        const decide = (allowed: boolean) => {
+          if (allowed) callback(null, true);
+          else callback(new Error("Not allowed by CORS"));
+        };
+        if (!origin) return decide(true);
+        const decision = allowOrigin(origin);
+        if (typeof decision === "boolean") decide(decision);
+        else decision.then(decide);
       },
       credentials: true,
     },
@@ -183,6 +212,41 @@ export function listenServer(
       reject(err);
     }
   });
+}
+
+/**
+ * Build the single CORS decision shared by HTTP and Socket.IO.
+ *
+ * The static list answers first and synchronously. Only an origin it does not
+ * allow reaches `isTrustedOrigin`, and that check fails closed: a throw, a
+ * rejection, or any result other than `true` denies the origin. The returned
+ * promise never rejects.
+ */
+export function createOriginPolicy(
+  trustedOrigins: string[],
+  isTrustedOrigin?: TrustedOriginCheck,
+): (origin: string) => boolean | Promise<boolean> {
+  return (origin) => {
+    if (isOriginAllowed(origin, trustedOrigins)) return true;
+    if (!isTrustedOrigin) return false;
+    return (async () => {
+      try {
+        return (await isTrustedOrigin(origin)) === true;
+      } catch (err) {
+        log.error(
+          "[cors] isTrustedOrigin failed, denying origin:",
+          stripQuery(origin),
+          err,
+        );
+        return false;
+      }
+    })();
+  };
+}
+
+/** Drop any query string or fragment so a log line never carries one. */
+function stripQuery(origin: string): string {
+  return origin.split(/[?#]/, 1)[0] ?? "";
 }
 
 /**
