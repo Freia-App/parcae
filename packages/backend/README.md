@@ -471,6 +471,34 @@ At startup, `createApp()` generates type metadata into `.parcae/` (gitignored, l
 | `ENSURE_SCHEMA`                   | No       | `false`       | Run migrations, additive schema, and trigger DDL  |
 | `PARCAE_ALLOW_CHECKSUM_DRIFT`     | No       | `false`       | Emergency bypass for applied-migration drift      |
 
+### CORS origins
+
+`TRUSTED_ORIGINS` is read once at boot. It accepts exact origins and `*`
+wildcards (`https://*.example.com`); unset, it allows `http(s)://localhost:*`.
+
+For origins added after boot, such as a customer's own domain, pass
+`isTrustedOrigin` to `createApp()`:
+
+```typescript
+const app = createApp({
+  models: "./models",
+  // Consulted only when TRUSTED_ORIGINS does not already allow the origin.
+  isTrustedOrigin: async (origin) => verifiedDomains.has(origin),
+});
+```
+
+- One check serves both the HTTP CORS middleware and the Socket.IO handshake,
+  so the two always agree. An OPTIONS preflight gets the same answer as the
+  request that follows it.
+- Only `true` allows. Any other result, a throw, or a rejection denies the
+  origin and logs the error; it never crashes the request and never allows.
+- An allowed origin is echoed back with `Access-Control-Allow-Credentials:
+  true`, never `*`.
+- It runs on every cross-origin request the static list misses, preflights
+  included, so keep it fast and cache any database lookup behind it.
+
+Without the option, CORS behaves exactly as before.
+
 ### Process roles
 
 The four `RUN_*` flags compose to give you useful process shapes:
