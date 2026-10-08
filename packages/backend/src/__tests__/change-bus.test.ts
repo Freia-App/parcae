@@ -26,6 +26,9 @@ const pg = vi.hoisted(() => {
         }
       }),
       isListener: false,
+      // A session that has silently died: still "connected" as far as the
+      // client knows, emitting neither error nor end, and receiving nothing.
+      deaf: false,
       query: vi.fn(async (sql: string, params?: unknown[]) => {
         if (sql.startsWith('LISTEN')) client.isListener = true;
         if (endDuringQuery) {
@@ -39,6 +42,7 @@ const pg = vi.hoisted(() => {
           // Broadcast: the probe notifies from a second connection, so
           // delivery has to cross clients the way a row trigger does.
           for (const peer of clients) {
+            if (peer.deaf) continue;
             peer.emit('notification', {
               channel: String(params?.[0]),
               payload: String(params?.[1]),
@@ -317,6 +321,63 @@ describe('ChangeBus', () => {
     await failure;
     expect(pg.clients[0]!.end).toHaveBeenCalledTimes(1);
     release();
+  });
+
+  it('holds the LISTEN connection with TCP keepalive', async () => {
+    const bus = new ChangeBus({ url: 'postgres://unused' });
+    await bus.start();
+
+    expect(pg.Client).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ keepAlive: true }),
+    );
+    await bus.stop();
+  });
+
+  // Production lost its only listener when the database compute restarted:
+  // the socket went quiet without an error or end event, so nothing ran the
+  // reconnect path and realtime stayed dead with a healthy log.
+  it('reconnects a LISTEN connection that stops receiving without an error', async () => {
+    const bus = new ChangeBus({
+      url: 'postgres://unused',
+      heartbeatIntervalMs: 1000,
+      deliveryProbeTimeoutMs: 100,
+      initialReconnectDelay: 10,
+    });
+    const reconnected = vi.fn();
+    bus.onReconnect(reconnected);
+    await bus.start();
+
+    const dead = pg.listeners()[0]!;
+    dead.deaf = true;
+    await vi.advanceTimersByTimeAsync(1000 + 100 + 10);
+
+    expect(pg.listeners()).toHaveLength(2);
+    expect(dead.end).toHaveBeenCalled();
+    expect(reconnected).toHaveBeenCalledTimes(1);
+    await bus.stop();
+  });
+
+  it('keeps a connection that still receives and stops checking once stopped', async () => {
+    const bus = new ChangeBus({
+      url: 'postgres://unused',
+      heartbeatIntervalMs: 1000,
+    });
+    const reconnected = vi.fn();
+    bus.onReconnect(reconnected);
+    await bus.start();
+    const afterStart = pg.clients.length;
+
+    await vi.advanceTimersByTimeAsync(3000);
+    // One short-lived notifier per check, and the listener never replaced.
+    expect(pg.clients.length - afterStart).toBe(3);
+    expect(pg.listeners()).toHaveLength(1);
+    expect(reconnected).not.toHaveBeenCalled();
+
+    await bus.stop();
+    const afterStop = pg.clients.length;
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(pg.clients).toHaveLength(afterStop);
   });
 
   it('bounds connection setup with a finite timeout', async () => {
