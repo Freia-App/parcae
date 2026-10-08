@@ -19,6 +19,7 @@ const INITIAL_RECONNECT_DELAY = 500;
 const MAX_RECONNECT_DELAY = 30_000;
 const CONNECT_TIMEOUT = 10_000;
 const DELIVERY_PROBE_TIMEOUT = 5_000;
+const HEARTBEAT_INTERVAL = 60_000;
 
 /** Marks a self-addressed notification, never dispatched to listeners. */
 const PROBE_KEY = '__parcaeProbe';
@@ -69,6 +70,7 @@ interface ChangeBusOptions {
   maxReconnectDelay?: number;
   connectTimeoutMs?: number;
   deliveryProbeTimeoutMs?: number;
+  heartbeatIntervalMs?: number;
 }
 
 export class ChangeBus {
@@ -91,6 +93,8 @@ export class ChangeBus {
   private deliveryProbeTimeoutMs: number;
   private pendingProbe: { nonce: string; settle: (ok: boolean) => void } | null =
     null;
+  private heartbeatIntervalMs: number;
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: ChangeBusOptions) {
     const listenUrl = opts.listenUrl ?? directEndpointFor(opts.url);
@@ -108,6 +112,10 @@ export class ChangeBus {
       opts.initialReconnectDelay ?? INITIAL_RECONNECT_DELAY;
     this.maxReconnectDelay = opts.maxReconnectDelay ?? MAX_RECONNECT_DELAY;
     this.connectTimeoutMs = Math.max(1, opts.connectTimeoutMs ?? CONNECT_TIMEOUT);
+    this.heartbeatIntervalMs = Math.max(
+      1,
+      opts.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL,
+    );
   }
 
   on(listener: ChangeListener): () => void {
@@ -155,6 +163,7 @@ export class ChangeBus {
     this.cancelConnect?.();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    this._clearHeartbeat();
     const client = this.client;
     this.client = null;
     if (client) await this._endClient(client);
@@ -167,9 +176,13 @@ export class ChangeBus {
   }
 
   private async _connect(generation: number): Promise<boolean> {
+    // A LISTEN connection sits idle by design, so without keepalive a peer
+    // that vanishes (a compute restart, a dropped NAT entry) never surfaces
+    // as an error or end event and the subscription is dead with no signal.
     const client = new Client({
       connectionString: this.url,
       connectionTimeoutMillis: this.connectTimeoutMs,
+      keepAlive: true,
     });
     this.client = client;
 
@@ -230,6 +243,7 @@ export class ChangeBus {
 
     const reconnected = this.state === 'started';
     this.reconnectAttempt = 0;
+    this._scheduleHeartbeat(generation);
     log.info(`changeBus: subscribed to "${PARCAE_CHANNEL}"`);
     if (reconnected) {
       for (const listener of this.reconnectListeners) {
@@ -292,7 +306,7 @@ export class ChangeBus {
       );
     } finally {
       if (timer) clearTimeout(timer);
-      this.pendingProbe = null;
+      if (this.pendingProbe?.nonce === nonce) this.pendingProbe = null;
       await this._endClient(notifier);
     }
     throw new Error(
@@ -405,7 +419,47 @@ export class ChangeBus {
     this.reconnectTimer.unref?.();
   }
 
+  /**
+   * Re-prove delivery on the live connection, on a timer, for as long as it
+   * is the current one. Keepalive catches a dead socket; this catches a
+   * connection that is up and no longer receives, which nothing else would.
+   * A failure goes down the ordinary reconnect path, whose reconnect
+   * listeners reconcile whatever was missed while it was deaf.
+   */
+  private _scheduleHeartbeat(generation: number): void {
+    this._clearHeartbeat();
+    this.heartbeatTimer = setTimeout(() => {
+      this.heartbeatTimer = null;
+      void this._heartbeat(generation);
+    }, this.heartbeatIntervalMs);
+    this.heartbeatTimer.unref?.();
+  }
+
+  private async _heartbeat(generation: number): Promise<void> {
+    const client = this.client;
+    if (!this._isCurrent(generation) || !client) return;
+    if (this.reconnectTimer || this.reconnectWork) return;
+    try {
+      await this._assertDelivery();
+    } catch (err) {
+      // A disconnect during the probe has already started a reconnect.
+      if (!this._isCurrent(generation) || this.client !== client) return;
+      log.warn(
+        `changeBus: liveness check failed, reconnecting: ${(err as Error).message}`,
+      );
+      this._handleDisconnect();
+      return;
+    }
+    if (this._isCurrent(generation)) this._scheduleHeartbeat(generation);
+  }
+
+  private _clearHeartbeat(): void {
+    if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+
   private _handleDisconnect(): void {
+    this._clearHeartbeat();
     if (this.state === 'starting') {
       this.disconnectedDuringStart = true;
       return;
