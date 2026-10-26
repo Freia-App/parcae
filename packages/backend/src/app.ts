@@ -8,6 +8,7 @@
  */
 
 import { resolve, join } from "node:path";
+import { parse as parseQuery } from "node:querystring";
 import { readdirSync, existsSync } from "node:fs";
 import pako from "pako";
 import { compress } from "compress-json";
@@ -1394,18 +1395,10 @@ export function createApp(config: AppConfig): ParcaeApp {
               }
             }
             try {
-              // Parse query string from path
+              // Parse query string from path, as polka parses it over HTTP:
+              // "+" is a space and a value may itself contain "=".
               const [pathname, qs] = path.split("?");
-              const query: Record<string, any> = {};
-              if (qs) {
-                for (const pair of qs.split("&")) {
-                  const [k, v] = pair.split("=");
-                  if (k)
-                    query[decodeURIComponent(k)] = v
-                      ? decodeURIComponent(v)
-                      : "";
-                }
-              }
+              const query: Record<string, any> = qs ? parseQuery(qs) : {};
 
               // Merge URL query params with socket data for GET requests
               const mergedQuery =
