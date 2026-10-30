@@ -228,7 +228,7 @@ function saveConflictTests(
         break;
       }
       if (cursor === null || typeof cursor !== "object") break;
-      cursor = cursor[segment];
+      cursor = Object.hasOwn(cursor, segment) ? cursor[segment] : undefined;
       path.push(segment);
     }
     if (Array.isArray(cursor)) addTest(path, cursor);
