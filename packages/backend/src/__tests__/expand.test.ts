@@ -204,6 +204,26 @@ describePostgres("expand — integration through BackendAdapter", () => {
     expect(anonymous.map((row) => row.file)).toEqual([null, null]);
   });
 
+  it("filters through a ref only within the target's read scope", async () => {
+    await db("files").insert([
+      { id: "f1", data: "{}", org: "o1", url: "https://cdn/own", mime: "", bytes: 0 },
+      { id: "f2", data: "{}", org: "o2", url: "https://cdn/other", mime: "", bytes: 0 },
+    ]);
+    await db("assets").insert([
+      { id: "a1", data: "{}", kind: "image", file: "f1" },
+      { id: "a2", data: "{}", kind: "image", file: "f2" },
+    ]);
+    const ctx = { user: USER, params: {}, data: {} };
+    const ids = async (url: string) =>
+      (
+        await adapter
+          .queryFromClient(AssetM, {}, [{ method: "where", args: ["file.url", url] }], ctx)
+          .find()
+      ).map((a: any) => a.id);
+    expect(await ids("https://cdn/own")).toEqual(["a1"]);
+    expect(await ids("https://cdn/other")).toEqual([]);
+  });
+
   it("rejects expand on a non-ref field with a ClientError", () => {
     expect(() =>
       validateExpandSpecs(
