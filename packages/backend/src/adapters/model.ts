@@ -1451,33 +1451,26 @@ export class BackendAdapter implements ModelAdapter {
     // Validate the nested column exists on the target — and that this
     // ctx may reference it. The TARGET's `scope.fields` decides, not
     // the queried model's, or the subquery becomes a side door around
-    // a field withheld on the target.
-    if (targetSchema) {
-      const targetValidColumns = new Set([
-        "id",
-        "createdAt",
-        "updatedAt",
-        ...Object.keys(targetSchema),
-      ]);
-      if (
-        !targetValidColumns.has(refColumn) ||
-        policy.forTarget(resolvedTarget).has(refColumn)
-      ) {
-        throw new ClientError(
-          `Invalid column "${refColumn}" on referenced model "${targetType}"`,
-        );
-      }
-    }
-
-    // Build the subquery: SELECT id FROM <target_table> WHERE <refColumn> ...
-    // A client's subquery sees only the target rows it could read
-    // directly, or a row it can read confirms another tenant's value.
-    const readScope = policy.readScope?.(resolvedTarget);
-    if (readScope === null) {
+    // a field withheld on the target. The TARGET's `scope.read` bounds
+    // the subquery to rows this ctx could read directly, or a row it can
+    // read confirms another tenant's value; a target it cannot read is
+    // refused like a column it cannot name.
+    const readScope = policy.readScope(resolvedTarget);
+    const targetValidColumns = targetSchema
+      ? new Set(["id", "createdAt", "updatedAt", ...Object.keys(targetSchema)])
+      : null;
+    if (
+      readScope === null ||
+      (targetValidColumns &&
+        (!targetValidColumns.has(refColumn) ||
+          policy.forTarget(resolvedTarget).has(refColumn)))
+    ) {
       throw new ClientError(
         `Invalid column "${refColumn}" on referenced model "${targetType}"`,
       );
     }
+
+    // Build the subquery: SELECT id FROM <target_table> WHERE <refColumn> ...
     const subquery = this.read(targetTable).select("id");
     if (readScope) subquery.where(readScope);
 

@@ -1,14 +1,14 @@
 /**
  * Integration tests for `.expand(...)` against a real Postgres-backed
- * BackendAdapter + RefLoader + subscription manager. The flow under
+ * BackendAdapter + subscription manager. The flow under
  * test is the production wire path:
  *
  *   1. Client builds `ProjectAsset.where(...).expand("file").find()`.
  *   2. Frontend records the steps and posts them to the LIST handler.
  *   3. The handler strips expand steps, replays the rest through
  *      `queryFromClient`, runs the SQL, then `hydrateExpansions`
- *      embeds the linked File rows in the wire payload — batched
- *      through `RefLoader` (one `WHERE id IN (...)` for all files).
+ *      embeds the linked File rows in the wire payload — one
+ *      `WHERE id IN (...)` for all files, under File's `scope.read`.
  *   4. The wire payload carries `{ file: { ... }, $file: "f_xyz" }`.
  *   5. The frontend `Model.hydrate` keeps the inline ref object so
  *      `asset.file.url` reads are synchronous.
@@ -89,6 +89,7 @@ async function makeAdapter(db: Knex): Promise<BackendAdapter> {
 }
 
 const USER = { id: "u1", org: "o1" };
+const CTX = { user: USER, params: {}, data: {} };
 
 const REGISTRY: ReadonlyMap<string, any> = new Map<string, any>([
   ["file", FileM],
@@ -111,6 +112,21 @@ describePostgres("expand — integration through BackendAdapter", () => {
   afterEach(async () => {
     await database.close();
   });
+
+  const load = (type: string, ids: string[], scope: any) =>
+    adapter.batchFindByType(type, ids, scope);
+
+  // a1 → the caller's own file, a2 → another org's.
+  async function seedTwoOrgs() {
+    await db("files").insert([
+      { id: "f1", data: "{}", org: "o1", url: "https://cdn/own", mime: "", bytes: 0 },
+      { id: "f2", data: "{}", org: "o2", url: "https://cdn/other", mime: "", bytes: 0 },
+    ]);
+    await db("assets").insert([
+      { id: "a1", data: "{}", kind: "image", file: "f1" },
+      { id: "a2", data: "{}", kind: "image", file: "f2" },
+    ]);
+  }
 
   it("embeds the linked File row in the LIST payload in ONE batched query", async () => {
     // Seed: 5 files, 5 assets each referencing one.
@@ -135,89 +151,68 @@ describePostgres("expand — integration through BackendAdapter", () => {
     const sql: string[] = [];
     db.on("query", ({ sql: s }: { sql: string }) => sql.push(s));
 
-    await (async () => {
-        // Validate + resolve expand. (parse is pure, validate hits
-        // the registry.)
-        const expand = validateExpandSpecs(
-          parseExpandSpecs(["file"]),
-          AssetM as any,
-          REGISTRY as Map<string, any>,
-        );
-        // Run the SQL query.
-        const items = await adapter.query(AssetM).find();
-        // Sanitize to wire shape (mirrors `projectForWire`).
-        const wireItems = await Promise.all(
-          items.map((m: any) => m.sanitize()),
-        );
-        // Hydrate expansions in place.
-        await hydrateExpansions(wireItems, expand, load, USER);
-
-        // Each row got the embedded File.
-        for (const row of wireItems) {
-          expect(row.file).toMatchObject({
-            type: "file",
-            url: expect.stringMatching(/^https:\/\/cdn\//),
-          });
-          // The raw id is preserved as $<ref> per the DOL-148 contract.
-          expect(row.$file).toBe(row.file.id);
-        }
-
-        // Exactly ONE batched `SELECT … WHERE "id" in (?, ?, ?, ?, ?)`
-        // — the whole point. Before .expand(), this was 5 separate
-        // `WHERE id = ?` round-trips.
-        const fileLookups = sql.filter((s) =>
-          /from\s+["`]?files["`]?/i.test(s) && /\bin\s*\(/i.test(s),
-        );
-        expect(fileLookups).toHaveLength(1);
-        expect(fileLookups[0]).toMatch(/"org" = (\?|\$\d)/);
-    })();
-  });
-
-  const load = (type: string, ids: string[], scope: any) =>
-    adapter.batchFindByType(type, ids, scope);
-
-  it("expands a ref to a row outside the caller's read scope as null", async () => {
-    await db("files").insert([
-      { id: "f1", data: "{}", org: "o1", url: "https://cdn/own", mime: "", bytes: 0 },
-      { id: "f2", data: "{}", org: "o2", url: "https://cdn/other", mime: "", bytes: 0 },
-    ]);
-    await db("assets").insert([
-      { id: "a1", data: "{}", kind: "image", file: "f1" },
-      { id: "a2", data: "{}", kind: "image", file: "f2" },
-    ]);
     const expand = validateExpandSpecs(
       parseExpandSpecs(["file"]),
       AssetM as any,
       REGISTRY as Map<string, any>,
+      CTX,
     );
-    const items = await adapter.query(AssetM).orderBy("id").find();
+    const items = await adapter.query(AssetM).find();
     const wireItems = await Promise.all(items.map((m: any) => m.sanitize()));
     await hydrateExpansions(wireItems, expand, load, USER);
-    expect(wireItems.map((row) => row.file?.url ?? null)).toEqual([
+
+    // Each row got the embedded File.
+    for (const row of wireItems) {
+      expect(row.file).toMatchObject({
+        type: "file",
+        url: expect.stringMatching(/^https:\/\/cdn\//),
+      });
+      // The raw id is preserved as $<ref> per the DOL-148 contract.
+      expect(row.$file).toBe(row.file.id);
+    }
+
+    // Exactly ONE batched `SELECT … WHERE "id" in (?, ?, ?, ?, ?)`
+    // — the whole point. Before .expand(), this was 5 separate
+    // `WHERE id = ?` round-trips. It carries File's read scope.
+    const fileLookups = sql.filter((s) =>
+      /from\s+["`]?files["`]?/i.test(s) && /\bin\s*\(/i.test(s),
+    );
+    expect(fileLookups).toHaveLength(1);
+    expect(fileLookups[0]).toMatch(/"org" = (\?|\$\d)/);
+  });
+
+  it("expands a ref to a row outside the caller's read scope as null", async () => {
+    await seedTwoOrgs();
+    const items = await adapter.query(AssetM).orderBy("id").find();
+    const expandAs = async (ctx: any) => {
+      const wire = await Promise.all(items.map((m: any) => m.sanitize()));
+      const expand = validateExpandSpecs(
+        parseExpandSpecs(["file"]),
+        AssetM as any,
+        REGISTRY as Map<string, any>,
+        ctx,
+      );
+      await hydrateExpansions(wire, expand, load, ctx.user);
+      return wire;
+    };
+
+    const own = await expandAs(CTX);
+    expect(own.map((row) => row.file?.url ?? null)).toEqual([
       "https://cdn/own",
       null,
     ]);
-    expect(wireItems[1]!.$file).toBe("f2");
+    expect(own[1]!.$file).toBe("f2");
 
-    const anonymous = await Promise.all(items.map((m: any) => m.sanitize()));
-    await hydrateExpansions(anonymous, expand, load, null);
+    const anonymous = await expandAs({ user: null, params: {}, data: {} });
     expect(anonymous.map((row) => row.file)).toEqual([null, null]);
   });
 
   it("filters through a ref only within the target's read scope", async () => {
-    await db("files").insert([
-      { id: "f1", data: "{}", org: "o1", url: "https://cdn/own", mime: "", bytes: 0 },
-      { id: "f2", data: "{}", org: "o2", url: "https://cdn/other", mime: "", bytes: 0 },
-    ]);
-    await db("assets").insert([
-      { id: "a1", data: "{}", kind: "image", file: "f1" },
-      { id: "a2", data: "{}", kind: "image", file: "f2" },
-    ]);
-    const ctx = { user: USER, params: {}, data: {} };
+    await seedTwoOrgs();
     const ids = async (url: string) =>
       (
         await adapter
-          .queryFromClient(AssetM, {}, [{ method: "where", args: ["file.url", url] }], ctx)
+          .queryFromClient(AssetM, {}, [{ method: "where", args: ["file.url", url] }], CTX)
           .find()
       ).map((a: any) => a.id);
     expect(await ids("https://cdn/own")).toEqual(["a1"]);
@@ -230,6 +225,7 @@ describePostgres("expand — integration through BackendAdapter", () => {
         parseExpandSpecs(["kind"]),
         AssetM as any,
         REGISTRY as Map<string, any>,
+        CTX,
       ),
     ).toThrow(/not a ref field/);
   });
@@ -240,6 +236,7 @@ describePostgres("expand — integration through BackendAdapter", () => {
         parseExpandSpecs(["nonexistent"]),
         AssetM as any,
         REGISTRY as Map<string, any>,
+        CTX,
       ),
     ).toThrow(/not a ref field/);
   });
@@ -250,6 +247,7 @@ describePostgres("expand — integration through BackendAdapter", () => {
         parseExpandSpecs(["file.wat"]),
         AssetM as any,
         REGISTRY as Map<string, any>,
+        CTX,
       ),
     ).toThrow(/not a column on file/);
   });
@@ -318,6 +316,7 @@ describePostgres("expand — subscription manager integration", () => {
       parseExpandSpecs(["file"]),
       AssetM as any,
       REGISTRY as Map<string, any>,
+      CTX,
     );
 
     const sub = await manager.subscribe({
@@ -354,6 +353,7 @@ describePostgres("expand — subscription manager integration", () => {
         parseExpandSpecs(["file"]),
         AssetM as any,
         REGISTRY as Map<string, any>,
+        CTX,
       ),
       user: USER,
     });
@@ -386,6 +386,7 @@ describePostgres("expand — subscription manager integration", () => {
       parseExpandSpecs(["file"]),
       AssetM as any,
       REGISTRY as Map<string, any>,
+      CTX,
     );
     await manager.subscribe({
       socketId: "s1",
@@ -440,6 +441,7 @@ describePostgres("expand — subscription manager integration", () => {
         parseExpandSpecs(["file"]),
         AssetM as any,
         REGISTRY as Map<string, any>,
+        CTX,
       ),
       user: USER,
     });

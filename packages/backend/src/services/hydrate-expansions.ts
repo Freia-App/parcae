@@ -47,6 +47,7 @@
 import type {
   ModelConstructor,
   SchemaDefinition,
+  ScopeContext,
 } from "@parcae/model";
 import { ClientError } from "../helpers";
 import { readScopeFor, type ReadScope } from "./field-policy";
@@ -152,6 +153,8 @@ export interface ResolvedExpand {
   targetType: string;
   targetClass: ModelConstructor;
   projection: ReadonlySet<string> | null; // null ⇒ whole-row
+  /** The target rows the caller may read; null expands every ref to null. */
+  readScope: ReadScope | null;
 }
 
 /**
@@ -163,11 +166,14 @@ export interface ResolvedExpand {
  * `models` is the adapter's `_models` registry (type → constructor).
  * We accept it as a `Map` rather than coupling to BackendAdapter so
  * tests can build a minimal stub without spinning up an adapter.
+ * `ctx` is the request's scope context: each target's `scope.read`
+ * for it bounds what the expand may load.
  */
 export function validateExpandSpecs(
   specs: ExpandSpec,
   modelClass: ModelConstructor,
   models: ReadonlyMap<string, ModelConstructor>,
+  ctx?: ScopeContext,
 ): ResolvedExpand[] {
   if (specs.size === 0) return [];
   const schema =
@@ -221,6 +227,7 @@ export function validateExpandSpecs(
       targetType,
       targetClass,
       projection: field.whole ? null : new Set(field.fields),
+      readScope: readScopeFor(targetClass, ctx),
     });
   }
   return resolved;
@@ -309,12 +316,11 @@ function projectFields(
  * preserved at `$<refField>` so the frontend's `(file, $file)`
  * accessor pair still works regardless of expansion.
  *
- * `user` is the request's user. Each target loads under its
- * `scope.read` for that user, evaluated as the resync handler builds
- * its ctx (a LIST has no params or body), so a ref to a row the user
- * cannot read, or into a model with no read scope, comes back `null`
- * exactly like a ref to a missing row. The loaded row then goes through
- * the target's `sanitize(user)`.
+ * Each target loads under the `readScope` `validateExpandSpecs`
+ * resolved for the caller, so a ref to a row the caller cannot read,
+ * or into a model with no read scope, comes back `null` exactly like
+ * a ref to a missing row. The loaded row then goes through the
+ * target's `sanitize(user)`.
  */
 export async function hydrateExpansions(
   items: WireRow[],
@@ -324,48 +330,48 @@ export async function hydrateExpansions(
 ): Promise<void> {
   if (items.length === 0 || resolved.length === 0) return;
 
-  const ctx = { user: user ?? null, params: {}, data: {} };
-  const ids = resolved.map((exp) =>
-    items.map((row) => getWireRefId(row, exp.refField)),
-  );
-
   // One scoped load per target type, however many ref fields share it.
   const byType = new Map<string, { scope: ReadScope | null; ids: Set<string> }>();
-  resolved.forEach((exp, index) => {
+  for (const exp of resolved) {
     let entry = byType.get(exp.targetType);
     if (!entry) {
-      entry = { scope: readScopeFor(exp.targetClass, ctx), ids: new Set() };
+      entry = { scope: exp.readScope, ids: new Set() };
       byType.set(exp.targetType, entry);
     }
-    for (const id of ids[index]!) if (id) entry.ids.add(id);
-  });
+    for (const row of items) {
+      const id = getWireRefId(row, exp.refField);
+      if (id) entry.ids.add(id);
+    }
+  }
   const loaded = new Map<string, Map<string, unknown>>();
   await Promise.all(
-    Array.from(byType, async ([type, { scope, ids: wanted }]) => {
+    Array.from(byType, async ([type, { scope, ids }]) => {
       loaded.set(
         type,
-        scope && wanted.size > 0
-          ? await load(type, Array.from(wanted), scope)
+        scope && ids.size > 0
+          ? await load(type, Array.from(ids), scope)
           : new Map(),
       );
     }),
   );
 
-  for (const [index, exp] of resolved.entries()) {
+  for (const exp of resolved) {
     const rows = loaded.get(exp.targetType)!;
-    for (const [i, row] of items.entries()) {
-      const refId = ids[index]![i] ?? null;
-      row[`$${exp.refField}`] = refId;
-      const target = refId ? rows.get(refId) : undefined;
-      if (!target) {
-        row[exp.refField] = null;
-        continue;
-      }
-      const sanitized = await projectForWire(target, user);
-      row[exp.refField] = exp.projection
-        ? projectFields(sanitized, exp.projection)
-        : sanitized;
-    }
+    await Promise.all(
+      items.map(async (row) => {
+        const refId = getWireRefId(row, exp.refField);
+        row[`$${exp.refField}`] = refId;
+        const target = refId ? rows.get(refId) : undefined;
+        if (!target) {
+          row[exp.refField] = null;
+          return;
+        }
+        const sanitized = await projectForWire(target, user);
+        row[exp.refField] = exp.projection
+          ? projectFields(sanitized, exp.projection)
+          : sanitized;
+      }),
+    );
   }
 }
 

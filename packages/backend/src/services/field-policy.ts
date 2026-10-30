@@ -10,7 +10,11 @@
  * adapter interface every mock has to satisfy.
  */
 
-import type { ModelConstructor, ScopeContext } from "@parcae/model";
+import type {
+  ModelConstructor,
+  ScopeContext,
+  ScopeResult,
+} from "@parcae/model";
 
 /** Shared empty result for models with no `scope.fields` policy. */
 const EMPTY: ReadonlySet<string> = new Set<string>();
@@ -39,7 +43,7 @@ export function deniedFields(
 }
 
 /** A `scope.read` result that admits rows: a query modifier or a where object. */
-export type ReadScope = ((qb: any) => any) | Record<string, any>;
+export type ReadScope = NonNullable<ScopeResult>;
 
 /**
  * The rows of `target` that `ctx` may read directly, as its `scope.read`
@@ -66,10 +70,11 @@ export interface FieldPolicy {
   own: ReadonlySet<string>;
   forTarget(target: ModelConstructor<any>): ReadonlySet<string>;
   /**
-   * The rows of a ref target this ctx may reach through a ref filter.
-   * Absent off the client path, where trusted code filters unscoped.
+   * The rows of a ref target this ctx may reach through a ref filter:
+   * null refuses the filter, undefined (trusted code only) leaves it
+   * unscoped.
    */
-  readScope?(target: ModelConstructor<any>): ReadScope | null;
+  readScope(target: ModelConstructor<any>): ReadScope | null | undefined;
 }
 
 /**
@@ -92,4 +97,5 @@ export function fieldPolicyFor(
 export const NO_FIELD_POLICY: FieldPolicy = {
   own: EMPTY,
   forTarget: () => EMPTY,
+  readScope: () => undefined,
 };

@@ -420,9 +420,9 @@ describe("QuerySubscriptionManager", () => {
         {
           refField: "file",
           targetType: "file",
-          // Expansion loads only what the target's read scope admits.
-          targetClass: { type: "file", scope: { read: () => ({}) } },
+          targetClass: class File {},
           projection: null,
+          readScope: {},
         },
       ];
       const sub = await manager.subscribe({
@@ -1250,8 +1250,9 @@ describe("QuerySubscriptionManager", () => {
         {
           refField: "file",
           targetType: "file",
-          targetClass: { type: "file", scope: { read: () => ({}) } },
+          targetClass: { type: "file" },
           projection: null,
+          readScope: {},
         },
       ];
       await manager.subscribe({

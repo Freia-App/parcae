@@ -33,12 +33,8 @@ import {
 
 // ─── Test fixtures ───────────────────────────────────────────────────────────
 
-// Every caller reads every file and user; the scope tests swap in their own.
-const READ_ALL = { read: () => ({}) };
-
 class FileModel extends Model {
   static override type = "file";
-  static override scope = READ_ALL;
   static override __schema = {
     url: "string",
     mime: "string",
@@ -51,7 +47,6 @@ class FileModel extends Model {
 
 class UserModel extends Model {
   static override type = "user";
-  static override scope = READ_ALL;
   static override __schema = { name: "string" } as any;
   name: string = "";
 }
@@ -284,7 +279,6 @@ describe("hydrateExpansions", () => {
       }
       return m;
     });
-    const loader = loadByIds;
 
     const resolved: ResolvedExpand[] = [
       {
@@ -292,9 +286,10 @@ describe("hydrateExpansions", () => {
         targetType: "file",
         targetClass: FileModel as any,
         projection: null,
+        readScope: {},
       },
     ];
-    await hydrateExpansions(items, resolved, loader, null);
+    await hydrateExpansions(items, resolved, loadByIds, null);
 
     expect(loadByIds).toHaveBeenCalledTimes(1);
     expect(items[0]!.file).toMatchObject({
@@ -311,7 +306,7 @@ describe("hydrateExpansions", () => {
 
   it("projects to the requested fields, always including id + type", async () => {
     const items: any[] = [{ id: "a1", type: "asset", file: "f1" }];
-    const loader = async (_type: string, ids: string[]) => {
+    const loadFiles = async (_type: string, ids: string[]) => {
       const m = new Map<string, unknown>();
       for (const id of ids) m.set(id, buildFile(id, "https://x", "image/png"));
       return m;
@@ -322,9 +317,10 @@ describe("hydrateExpansions", () => {
         targetType: "file",
         targetClass: FileModel as any,
         projection: new Set(["url"]),
+        readScope: {},
       },
     ];
-    await hydrateExpansions(items, resolved, loader, null);
+    await hydrateExpansions(items, resolved, loadFiles, null);
     expect(items[0]!.file).toEqual({
       id: "f1",
       type: "file",
@@ -348,7 +344,6 @@ describe("hydrateExpansions", () => {
       }
       return m;
     });
-    const loader = loadByIds;
     await hydrateExpansions(
       items,
       [
@@ -357,9 +352,10 @@ describe("hydrateExpansions", () => {
           targetType: "file",
           targetClass: FileModel as any,
           projection: null,
+          readScope: {},
         },
       ],
-      loader,
+      loadByIds,
       null,
     );
     expect(loadByIds).toHaveBeenCalledTimes(1);
@@ -368,7 +364,6 @@ describe("hydrateExpansions", () => {
 
   it("nulls the ref when the linked row is missing, but still stamps $<ref>", async () => {
     const items: any[] = [{ id: "a1", type: "asset", file: "ghost" }];
-    const loader = async () => new Map<string, unknown>();
     await hydrateExpansions(
       items,
       [
@@ -377,9 +372,10 @@ describe("hydrateExpansions", () => {
           targetType: "file",
           targetClass: FileModel as any,
           projection: null,
+          readScope: {},
         },
       ],
-      loader,
+      async () => new Map<string, unknown>(),
       null,
     );
     expect(items[0]!.file).toBeNull();
@@ -389,7 +385,6 @@ describe("hydrateExpansions", () => {
   it("nulls the ref AND stamps $<ref>: null when the row has no ref id", async () => {
     const items: any[] = [{ id: "a1", type: "asset", file: "" }];
     const loadByIds = vi.fn(async () => new Map<string, unknown>());
-    const loader = loadByIds;
     await hydrateExpansions(
       items,
       [
@@ -398,9 +393,10 @@ describe("hydrateExpansions", () => {
           targetType: "file",
           targetClass: FileModel as any,
           projection: null,
+          readScope: {},
         },
       ],
-      loader,
+      loadByIds,
       null,
     );
     expect(items[0]!.file).toBeNull();
@@ -429,7 +425,6 @@ describe("hydrateExpansions", () => {
       }
       return m;
     });
-    const loader = loadByIds;
     await hydrateExpansions(
       items,
       [
@@ -438,15 +433,17 @@ describe("hydrateExpansions", () => {
           targetType: "file",
           targetClass: FileModel as any,
           projection: null,
+          readScope: {},
         },
         {
           refField: "owner",
           targetType: "user",
           targetClass: UserModel as any,
           projection: null,
+          readScope: {},
         },
       ],
-      loader,
+      loadByIds,
       null,
     );
     expect(loadByIds).toHaveBeenCalledTimes(2); // one per target type
@@ -456,7 +453,7 @@ describe("hydrateExpansions", () => {
   });
 });
 
-describe("hydrateExpansions scopes each target", () => {
+describe("expansion scopes each target to the caller", () => {
   const OWN_ROWS = { owner: "u1" };
   class NoteModel extends Model {
     static override type = "note";
@@ -471,9 +468,14 @@ describe("hydrateExpansions scopes each target", () => {
     static override __schema = { body: "string" } as any;
     body: string = "";
   }
-  const expandOf = (target: any): ResolvedExpand[] => [
-    { refField: "ref", targetType: target.type, targetClass: target, projection: null },
-  ];
+  // The route's path: validate the spec under the caller's ctx, then hydrate.
+  const expandOf = (target: any, user: { id: string } | null) =>
+    validateExpandSpecs(
+      parseExpandSpecs(["ref"]),
+      { type: "holder", __schema: { ref: { kind: "ref", target } } } as any,
+      new Map([[target.type, target]]),
+      { user, params: {}, data: {} },
+    );
   const loadAll = (target: any) =>
     vi.fn(async (_type: string, ids: string[], _scope: unknown) => {
       const m = new Map<string, unknown>();
@@ -481,27 +483,36 @@ describe("hydrateExpansions scopes each target", () => {
       return m;
     });
 
-  it("loads under the target's scope.read for the requesting user", async () => {
+  it("loads under the target's scope.read for the caller", async () => {
     const load = loadAll(NoteModel);
     const items: any[] = [{ id: "a1", type: "asset", ref: "n1" }];
-    await hydrateExpansions(items, expandOf(NoteModel), load, { id: "u1" });
+    await hydrateExpansions(items, expandOf(NoteModel, { id: "u1" }), load, { id: "u1" });
     expect(load).toHaveBeenCalledWith("note", ["n1"], OWN_ROWS);
     expect(items[0]!.ref).toMatchObject({ id: "n1", body: "secret" });
   });
 
-  it("expands to null, without a load, when the target's scope denies the user", async () => {
+  it("expands to null, without a load, when the target's scope denies the caller", async () => {
     const load = loadAll(NoteModel);
     const items: any[] = [{ id: "a1", type: "asset", ref: "n1" }];
-    await hydrateExpansions(items, expandOf(NoteModel), load, { id: "u2" });
+    await hydrateExpansions(items, expandOf(NoteModel, { id: "u2" }), load, { id: "u2" });
     expect(load).not.toHaveBeenCalled();
     expect(items[0]!.ref).toBeNull();
     expect(items[0]!.$ref).toBe("n1");
   });
 
+  it("resolves no scope without a ctx, so nothing loads", () => {
+    const [exp] = validateExpandSpecs(
+      parseExpandSpecs(["ref"]),
+      { type: "holder", __schema: { ref: { kind: "ref", target: NoteModel } } } as any,
+      new Map([["note", NoteModel as any]]),
+    );
+    expect(exp!.readScope).toBeNull();
+  });
+
   it("expands to null when the target has no read scope at all", async () => {
     const load = loadAll(LogModel);
     const items: any[] = [{ id: "a1", type: "asset", ref: "l1" }];
-    await hydrateExpansions(items, expandOf(LogModel), load, { id: "u1" });
+    await hydrateExpansions(items, expandOf(LogModel, { id: "u1" }), load, { id: "u1" });
     expect(load).not.toHaveBeenCalled();
     expect(items[0]!.ref).toBeNull();
   });
@@ -510,7 +521,7 @@ describe("hydrateExpansions scopes each target", () => {
     const items: any[] = [{ id: "a1", type: "asset", ref: "n2" }];
     await hydrateExpansions(
       items,
-      expandOf(NoteModel),
+      expandOf(NoteModel, { id: "u1" }),
       async () => new Map<string, unknown>(),
       { id: "u1" },
     );
