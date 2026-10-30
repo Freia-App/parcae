@@ -63,6 +63,13 @@ export interface AuthAdapter {
 export interface AuthSession {
   /** The authenticated user. `id` maps to the User Model's ID. */
   user: { id: string; [key: string]: any };
+  /**
+   * When the credential behind this session stops being valid (epoch ms).
+   * A socket session is refused from this moment until the client renews
+   * or says hello again; an adapter that leaves it unset gets a socket
+   * session that lasts as long as the connection.
+   */
+  expiresAt?: number;
   /** Optional: raw session/token data from the provider. */
   [key: string]: any;
 }

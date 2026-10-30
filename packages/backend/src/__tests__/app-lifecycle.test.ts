@@ -1,3 +1,5 @@
+import { decompress } from "compress-json";
+import pako from "pako";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
@@ -157,6 +159,7 @@ import {
   resyncQueries,
 } from "../app";
 import type { AuthSession } from "../auth";
+import { route } from "../routing/route";
 import { getPubSub, getQueue } from "../services/context";
 
 const claim = Symbol.for("@parcae/backend/app-start-claimed");
@@ -307,6 +310,285 @@ describe("socket hello session ordering", () => {
     // as the old claims while the new token resolves.
     expect(observed).toEqual([null, null, null]);
     expect(controller.session).toEqual({ user: { id: "u1", role: "admin" } });
+  });
+});
+
+describe("socket session expiry", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const sessions: Record<string, AuthSession> = {
+    first: { user: { id: "u1", orgId: "o1", fva: [1, -1] }, expiresAt: 0 },
+    rotated: { user: { id: "u1", orgId: "o1", fva: [2, -1] }, expiresAt: 0 },
+    otherOrg: { user: { id: "u1", orgId: "o2" }, expiresAt: 0 },
+  };
+  function authExpiringIn(ms: number) {
+    return {
+      resolveToken: vi.fn(async (token: string) =>
+        sessions[token]
+          ? { ...sessions[token], expiresAt: Date.now() + ms }
+          : null,
+      ),
+    };
+  }
+
+  it("tells the client when the session expires and hands the socket over at that moment", async () => {
+    vi.useFakeTimers();
+    const onExpired = vi.fn();
+    const controller = createSocketSessionController(
+      "socket",
+      authExpiringIn(60_000) as any,
+      { unsubscribeAll: vi.fn() },
+      undefined,
+      onExpired,
+    );
+    const ack = vi.fn();
+    await controller.hello({ token: "first" }, ack);
+    expect(ack).toHaveBeenCalledWith({ userId: "u1", expiresInMs: 60_000 });
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(controller.expireIfDue()).toBe(false);
+    expect(onExpired).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onExpired).toHaveBeenCalledTimes(1);
+    expect(controller.expireIfDue()).toBe(true);
+  });
+
+  it("renews in place for the same authorization, pushing the expiry back", async () => {
+    vi.useFakeTimers();
+    const onExpired = vi.fn();
+    const subscriptions = { unsubscribeAll: vi.fn() };
+    const controller = createSocketSessionController(
+      "socket",
+      authExpiringIn(60_000) as any,
+      subscriptions,
+      undefined,
+      onExpired,
+    );
+    await controller.hello({ token: "first" });
+    const before = controller.capture()!;
+    await vi.advanceTimersByTimeAsync(50_000);
+
+    await expect(controller.renew({ token: "rotated" })).resolves.toEqual({
+      success: true,
+      userId: "u1",
+      expiresInMs: 60_000,
+    });
+    // Same operation: in-flight work fenced on it is still current, and
+    // the renew did not drop the socket's subscriptions.
+    expect(controller.isOperationCurrent(before.operation)).toBe(true);
+    expect(subscriptions.unsubscribeAll).toHaveBeenCalledTimes(1);
+    expect(controller.session?.user.fva).toEqual([2, -1]);
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(onExpired).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onExpired).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a renew that changes the authorization, is unresolvable, or has no session to extend", async () => {
+    const controller = createSocketSessionController(
+      "socket",
+      authExpiringIn(60_000) as any,
+      { unsubscribeAll: vi.fn() },
+    );
+    const refused = {
+      success: false,
+      error: "Session changed",
+      code: "session_changed",
+    };
+    await expect(controller.renew({ token: "first" })).resolves.toEqual(refused);
+    await controller.hello({ token: "first" });
+    const session = controller.session;
+    for (const payload of [
+      { token: "otherOrg" },
+      { token: "unknown" },
+      { token: 42 },
+      null,
+      "first",
+    ]) {
+      await expect(controller.renew(payload)).resolves.toEqual(refused);
+    }
+    expect(controller.session).toBe(session);
+  });
+
+  it("reads a session with an unusable expiry as expired", async () => {
+    for (const expiresAt of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const onExpired = vi.fn();
+      const controller = createSocketSessionController(
+        "socket",
+        { resolveToken: async () => ({ user: { id: "u1" }, expiresAt }) } as any,
+        { unsubscribeAll: vi.fn() },
+        undefined,
+        onExpired,
+      );
+      await controller.hello({ token: "t" });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(onExpired).toHaveBeenCalledTimes(1);
+      expect(controller.expireIfDue()).toBe(true);
+    }
+  });
+});
+
+describe("socket listeners", () => {
+  beforeEach(() => {
+    mocks.reset();
+    delete (globalThis as any)[claim];
+    vi.stubEnv("DATABASE_URL", "postgres://unused/test");
+    vi.stubEnv("ENSURE_SCHEMA", "false");
+  });
+
+  afterEach(() => {
+    delete (globalThis as any)[claim];
+    delete (globalThis as any).__parcae_adapter;
+    vi.unstubAllEnvs();
+  });
+
+  const MALFORMED: unknown[][] = [
+    [],
+    [null, null, null, null],
+    [42, 42, 42, 42],
+    ["disconnect", { not: "a method" }, ["a path"], undefined],
+    ["req1", "GET", "/v1/x", {}, "not-a-function"],
+    [{ token: 7 }, "not-a-function"],
+    [{ queries: [null, 1, { key: 2 }] }, "not-a-function"],
+    [{ queries: [] }, 12],
+    ["not-a-payload", { not: "a function" }],
+  ];
+
+  async function connect() {
+    route.on("custom:event", async () => {
+      throw new Error("handler bug");
+    });
+    const app = createApp({ models: [] });
+    await app.start({ port: 4000 });
+    const onConnection = mocks.servers[0]!.io.on.mock.calls.find(
+      (call: any[]) => call[0] === "connection",
+    )![1];
+    const listeners = new Map<string, (...args: any[]) => unknown>();
+    const socket = {
+      id: "socket-1",
+      handshake: { headers: {} },
+      conn: { close: vi.fn() },
+      on: (event: string, listener: (...args: any[]) => unknown) => {
+        listeners.set(event, listener);
+      },
+      emit: vi.fn(),
+      join: vi.fn(),
+      leave: vi.fn(),
+      disconnect: vi.fn(),
+      rooms: new Set<string>(),
+    };
+    onConnection(socket);
+    return { app, listeners, socket };
+  }
+
+  it("contains every throw and rejection a malformed frame causes, on every event", async () => {
+    const { app, listeners } = await connect();
+    expect([...listeners.keys()].sort()).toEqual([
+      "call",
+      "custom:event",
+      "disconnect",
+      "hello",
+      "renew",
+      "resync",
+      "unsubscribe:query",
+    ]);
+    const escaped: unknown[] = [];
+    const record = (reason: unknown) => escaped.push(reason);
+    const saved = process.listeners("unhandledRejection");
+    process.removeAllListeners("unhandledRejection");
+    process.on("unhandledRejection", record);
+    try {
+      for (const [event, listener] of listeners) {
+        if (event === "disconnect") continue;
+        for (const args of MALFORMED) {
+          expect(() => listener(...args), `${event}`).not.toThrow();
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      process.off("unhandledRejection", record);
+      for (const listener of saved) process.on("unhandledRejection", listener);
+      await app.stop();
+    }
+    expect(escaped).toEqual([]);
+  });
+
+  it("lets a streaming route's timer write after the call and stop on close, without crashing", async () => {
+    vi.useFakeTimers();
+    let wrote = 0;
+    let closed = 0;
+    const streamRoute = async (req: any, res: any) => {
+      res.flushHeaders?.();
+      const heartbeat = setInterval(() => {
+        res.write(": hb\n\n");
+        wrote++;
+      }, 1_000);
+      req.on("close", () => {
+        closed++;
+        clearInterval(heartbeat);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      res.end(JSON.stringify({ result: "done", success: true }));
+    };
+    const { app, listeners, socket } = await connect();
+    // The polka double stands in for routing: every call reaches this route.
+    mocks.servers[0]!.polka.handler.mockImplementation(streamRoute);
+    try {
+      listeners.get("hello")!({ token: null }, vi.fn());
+      await vi.advanceTimersByTimeAsync(0);
+      listeners.get("call")!("req2", "POST", "/v1/stream-test", {});
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(wrote).toBe(2);
+      expect(closed).toBe(1);
+      const [event, frame] = socket.emit.mock.calls.at(-1)!;
+      expect(event).toBe("req2");
+      expect(
+        decompress(JSON.parse(pako.ungzip(frame, { to: "string" }))),
+      ).toMatchObject({ result: "done", success: true });
+    } finally {
+      vi.useRealTimers();
+      await app.stop();
+    }
+  });
+
+  it("closes a call's request when the socket disconnects mid-call", async () => {
+    let closed = 0;
+    const { app, listeners } = await connect();
+    mocks.servers[0]!.polka.handler.mockImplementation(async (req: any) => {
+      req.on("close", () => {
+        closed++;
+      });
+      await new Promise(() => {});
+    });
+    try {
+      listeners.get("hello")!({ token: null }, vi.fn());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      listeners.get("call")!("req3", "POST", "/v1/hang-test", {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      listeners.get("disconnect")!();
+      expect(closed).toBe(1);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it("answers a call with a malformed method or path with a 400 on its request id", async () => {
+    const { app, listeners, socket } = await connect();
+    try {
+      listeners.get("hello")!({ token: null }, vi.fn());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      listeners.get("call")!("req1", 42, "/v1/x", {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const [event, frame] = socket.emit.mock.calls.at(-1)!;
+      expect(event).toBe("req1");
+      const reply = decompress(JSON.parse(pako.ungzip(frame, { to: "string" })));
+      expect(reply).toMatchObject({ success: false, status: 400 });
+    } finally {
+      await app.stop();
+    }
   });
 });
 

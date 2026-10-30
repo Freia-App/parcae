@@ -79,6 +79,17 @@ export class SocketSessionReconciler<T> {
     return { applied: true, session: this.current };
   }
 
+  /**
+   * Swap in a renewed session for the same authorization without starting
+   * a new operation, so in-flight work fenced on the operation stays valid.
+   * Refused when anything replaced or cleared the snapshot's session.
+   */
+  replace(snapshot: SocketSessionSnapshot<T>, session: T): boolean {
+    if (!this.isCurrent(snapshot)) return false;
+    this.current = session;
+    return true;
+  }
+
   invalidate(): void {
     this.operation++;
     this.current = null;

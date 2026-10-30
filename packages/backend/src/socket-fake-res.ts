@@ -30,6 +30,7 @@ export function createSocketFakeRes(
   socket: SocketEmitter,
   requestId: string,
   isSessionCurrent: () => boolean = () => true,
+  onEnd?: () => void,
 ): any {
   // biome-ignore lint/suspicious/noExplicitAny: parsed JSON of any shape
   let responseBody: any = null;
@@ -45,9 +46,28 @@ export function createSocketFakeRes(
     setHeader() {
       return this;
     },
+    // A streaming (SSE) route has no stream to write to over the socket;
+    // its chunks are dropped and only `end()` answers the call. Without
+    // these a heartbeat timer calling `res.write` throws outside any
+    // handler and exits the process.
+    flushHeaders() {},
+    write() {
+      return !this.writableEnded;
+    },
     end(body?: string) {
       if (this.writableEnded) return;
       this.writableEnded = true;
+      // Close listeners run after the reply, so one that throws cannot
+      // swallow it.
+      try {
+        reply(this.statusCode, body);
+      } finally {
+        onEnd?.();
+      }
+    },
+  };
+
+  function reply(statusCode: number, body?: string) {
       // A response computed under a prior session must never reach the
       // socket after an auth boundary; the state flip above still lets
       // middleware short-circuit checks observe a finished response.
@@ -60,17 +80,49 @@ export function createSocketFakeRes(
         }
       }
       if (
-        this.statusCode >= 400 &&
+        statusCode >= 400 &&
         responseBody &&
         typeof responseBody === "object" &&
         !Array.isArray(responseBody)
       ) {
-        responseBody = { ...responseBody, status: this.statusCode };
+        responseBody = { ...responseBody, status: statusCode };
       }
       const compressed = pako.gzip(
         JSON.stringify(compress(responseBody ?? { result: null, success: true })),
       );
       socket.emit(requestId, compressed);
+  }
+}
+
+/**
+ * The `close` event of the fake request a socket call runs as. Routes
+ * register `req.on("close")` to stop work when the client goes away; it
+ * fires when the call's response ends or the socket disconnects. Any other
+ * request event (a body stream) does not exist over the socket and throws
+ * inside the handler, where the route's own error path answers it.
+ */
+export function createSocketRequestEvents() {
+  const listeners = new Set<() => void>();
+  let closed = false;
+  const on = (event: string, listener: () => void) => {
+    if (event !== "close") {
+      throw new Error(`A socket call has no "${event}" request event`);
+    }
+    if (!closed) listeners.add(listener);
+    return methods;
+  };
+  const off = (_event: string, listener: () => void) => {
+    listeners.delete(listener);
+    return methods;
+  };
+  const methods = { on, once: on, off, removeListener: off };
+  return {
+    methods,
+    close() {
+      if (closed) return;
+      closed = true;
+      for (const listener of [...listeners]) listener();
+      listeners.clear();
     },
   };
 }

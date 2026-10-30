@@ -47,6 +47,13 @@ const KICK_FLOOR_MS = 2_000;
  * outage still fails visibly instead of at the 120s call timeout.
  */
 const RESEND_GRACE_MS = 15_000;
+/**
+ * The server ends a socket session when its token expires. Renewal starts
+ * this long before, retrying while the auth provider still hands back the
+ * token the server already has (Clerk refreshes only near the expiry).
+ */
+const RENEW_EARLY_MS = 15_000;
+const RENEW_RETRY_MS = 2_000;
 
 const uid = new ShortId({ length: 10 });
 
@@ -226,6 +233,7 @@ export class SocketTransport extends EventEmitter implements Transport {
   private rpcStallRecoveryPending = false;
   private lastHelloAttemptAt: number | null = null;
   private lastHelloAckAt: number | null = null;
+  private renewTimer: ReturnType<typeof setTimeout> | null = null;
   private subscriptions = new Map<
     string,
     Map<(...args: any[]) => void, (...args: any[]) => void>
@@ -602,6 +610,7 @@ export class SocketTransport extends EventEmitter implements Transport {
             typeof response.build === "string" ? response.build : null,
           );
           this.confirmedHelloToken = token;
+          this._scheduleRenew(generation, response.expiresInMs);
           this.sessionReadyForEvents = true;
           this._resendSuspendedCalls();
           this._scheduleWatchdog();
@@ -629,7 +638,74 @@ export class SocketTransport extends EventEmitter implements Transport {
     this.emit("error", error);
   }
 
+  /**
+   * Keep the server's session alive across token rotation. Before the
+   * expiry the server reported, send the current token on `renew`, which
+   * extends the session in place. A refusal means the authorization moved,
+   * so a full hello takes over. Without renewal the server closes the
+   * connection at expiry and the reconnect hello recovers, at the cost of
+   * resyncing every query.
+   */
+  private _scheduleRenew(generation: number, expiresInMs: unknown): void {
+    this._clearRenew();
+    if (typeof expiresInMs !== "number" || !Number.isFinite(expiresInMs)) {
+      return;
+    }
+    const deadline = Date.now() + expiresInMs;
+    const current = () =>
+      generation === this.sessionGeneration &&
+      !this.isDisposed &&
+      this.socket.connected;
+    const retry = () => {
+      if (current() && Date.now() + RENEW_RETRY_MS < deadline) {
+        this.renewTimer = setTimeout(attempt, RENEW_RETRY_MS);
+      }
+    };
+    const attempt = () => {
+      this.renewTimer = null;
+      if (!current()) return;
+      void this.getToken().then(
+        (token) => {
+          if (!current() || token === null) return;
+          if (token === this.confirmedHelloToken) {
+            retry();
+            return;
+          }
+          let answered = false;
+          const timer = setTimeout(() => {
+            answered = true;
+            retry();
+          }, this.handshakeTimeout);
+          this.socket.emit("renew", { token }, (response: any) => {
+            if (answered) return;
+            answered = true;
+            clearTimeout(timer);
+            if (!current()) return;
+            if (response?.success === true) {
+              this.confirmedHelloToken = token;
+              this._scheduleRenew(generation, response.expiresInMs);
+              return;
+            }
+            log.debug("renew refused, saying hello again");
+            void this.refreshSession().catch(() => {});
+          });
+        },
+        () => retry(),
+      );
+    };
+    this.renewTimer = setTimeout(
+      attempt,
+      Math.max(expiresInMs - RENEW_EARLY_MS, 0),
+    );
+  }
+
+  private _clearRenew(): void {
+    if (this.renewTimer) clearTimeout(this.renewTimer);
+    this.renewTimer = null;
+  }
+
   private _advanceGeneration(error: Error): void {
+    this._clearRenew();
     this.sessionGeneration++;
     this.inflight.clear();
     this.helloState = "rejected";

@@ -60,6 +60,19 @@ describe("clerk server adapter", () => {
     });
   });
 
+  it("carries the token's expiry onto the session so a socket session ends with it", async () => {
+    mocks.verifyToken.mockResolvedValue({ sub: "user_1", exp: 1_900_000_060 });
+    const ctx = setupContext();
+    ctx.rows.set("user_1", { id: "user_1" });
+    const auth = clerk(config);
+    await auth.setup(ctx);
+
+    await expect(auth.resolveToken("token")).resolves.toEqual({
+      user: { id: "user_1" },
+      expiresAt: 1_900_000_060_000,
+    });
+  });
+
   it("reads the org role from the v2 JWT claim without calling the Clerk API", async () => {
     mocks.verifyToken.mockResolvedValue({
       sub: "user_1",
