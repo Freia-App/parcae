@@ -36,7 +36,7 @@
  */
 
 import type { ModelConstructor, ScopeContext } from "@parcae/model";
-import { Model } from "@parcae/model";
+import { isUnsafePatchPath, Model } from "@parcae/model";
 import pluralize from "pluralize";
 import { ClientError, json, notFound, forbidden } from "../helpers";
 import { log } from "../logger";
@@ -277,6 +277,9 @@ function assertSupportedPatchOps(ops: unknown[]): void {
     }
     if (typeof op.path !== "string" || !op.path.startsWith("/")) {
       throw new ClientError("patch: op path must start with '/'");
+    }
+    if (isUnsafePatchPath(op.path)) {
+      throw new ClientError(`patch: unsafe path "${op.path}"`);
     }
   }
 }

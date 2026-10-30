@@ -435,6 +435,33 @@ function pointerSegments(path: string): string[] {
   return path.slice(1).split("/").map(decodePointerSegment);
 }
 
+const UNSAFE_POINTER_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
+ * True when a JSON Pointer names `__proto__`, `constructor` or `prototype`.
+ * Following one of those walks off the row onto a prototype every object in
+ * the process shares, so every patch walker refuses such a path before it
+ * reads or writes along it.
+ */
+export function isUnsafePatchPath(path: string): boolean {
+  return path
+    .split("/")
+    .some((segment) => UNSAFE_POINTER_SEGMENTS.has(decodePointerSegment(segment)));
+}
+
+/** Refuse the whole batch if any op's path (or `from`) is unsafe. */
+function assertSafePatchPaths(
+  ops: readonly { path: string; from?: string }[],
+): void {
+  for (const op of ops) {
+    for (const path of op.from === undefined ? [op.path] : [op.path, op.from]) {
+      if (isUnsafePatchPath(path)) {
+        throw new Error(`patch: unsafe path "${path}"`);
+      }
+    }
+  }
+}
+
 /**
  * The path to hold while an op is in flight. An append (`/tags/-`) comes back
  * from the server as an indexed insert (`/tags/1`), which overlaps the array
@@ -476,12 +503,13 @@ export function ensureIntermediates(
   doc: Record<string, any>,
   ops: readonly { path: string }[],
 ): void {
+  assertSafePatchPaths(ops);
   for (const { path } of ops) {
     const segments = pointerSegments(path);
     let cursor: any = doc;
     for (let i = 0; i < segments.length - 1; i++) {
       const seg = segments[i]!;
-      const val = cursor[seg];
+      const val = Object.hasOwn(cursor, seg) ? cursor[seg] : undefined;
       if (val === null || val === undefined || typeof val !== "object") {
         cursor[seg] = isArrayIndexSegment(segments[i + 1]) ? [] : {};
       }
@@ -1586,6 +1614,7 @@ export class Model extends EventEmitter {
   }
 
   [SYM_SERVER_PATCH](ops: readonly PatchOp[]): this {
+    assertSafePatchPaths(ops);
     // Every outer op, echoes of in-flight writes included: the baseline the
     // next frame is diffed against advances with all of them.
     const outerOps: PatchOp[] = [];

@@ -11,6 +11,7 @@ export {
   flushChangeEmits,
   generateId,
   isArrayIndexSegment,
+  isUnsafePatchPath,
   Model,
   pathsOverlap,
   serializeLazyQueryArgs,

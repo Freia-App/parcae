@@ -25,6 +25,7 @@ import {
 import {
   dateSafeClone,
   generateId,
+  isUnsafePatchPath,
   type Model,
   type WithRefs,
 } from "@parcae/model";
@@ -132,6 +133,9 @@ function tableName(modelClass: ModelConstructor): string {
 function parsePatchPath(path: string): string[] {
   if (!path.startsWith("/")) {
     throw new ClientError(`patch: invalid path "${path}"`);
+  }
+  if (isUnsafePatchPath(path)) {
+    throw new ClientError(`patch: unsafe path "${path}"`);
   }
   return path
     .slice(1)
@@ -1745,7 +1749,7 @@ export class BackendAdapter implements ModelAdapter {
       if (!VALID_COLUMN_RE.test(column)) {
         throw new ClientError(`patch: invalid column name "${column}"`);
       }
-      if (!(column in schema)) {
+      if (!Object.hasOwn(schema, column)) {
         throw new ClientError(
           `patch: unknown column "${column}" on model "${ModelClass.type}"`,
         );
@@ -2093,7 +2097,7 @@ export class BackendAdapter implements ModelAdapter {
     let cursor = data;
     for (const seg of segments) {
       if (cursor == null || typeof cursor !== "object") return false;
-      cursor = cursor[seg];
+      cursor = Object.hasOwn(cursor, seg) ? cursor[seg] : undefined;
     }
     return cursor !== null && typeof cursor === "object";
   }
@@ -2108,7 +2112,10 @@ export class BackendAdapter implements ModelAdapter {
       if (op.op === "test") {
         let actual: any = state;
         for (const segment of parsePatchPath(op.path)) {
-          actual = actual?.[segment];
+          actual =
+            actual != null && Object.hasOwn(actual, segment)
+              ? actual[segment]
+              : undefined;
         }
         if (!equal(actual, op.value)) {
           throw new ClientError(`patch test failed at ${op.path}`, failureStatus);
@@ -2122,7 +2129,11 @@ export class BackendAdapter implements ModelAdapter {
       let parent = state;
       for (let i = 0; i < segments.length - 1; i++) {
         const segment = segments[i]!;
-        if (parent[segment] == null || typeof parent[segment] !== "object") {
+        if (
+          !Object.hasOwn(parent, segment) ||
+          parent[segment] == null ||
+          typeof parent[segment] !== "object"
+        ) {
           parent[segment] = isArrayIndexSegment(segments[i + 1]) ? [] : {};
         }
         parent = parent[segment];
