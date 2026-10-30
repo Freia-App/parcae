@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { log } from "./logger";
 
 /**
@@ -66,29 +67,10 @@ export function isReplyableRequestId(id: unknown): id is string {
 // Fields that change on every token without changing what the session may
 // do: the expiry itself, and Clerk's factor-verification age, which ticks
 // every minute (the SDK's VOLATILE_CLAIMS skips it for the same reason).
-const VOLATILE_SESSION_FIELDS = new Set(["expiresAt"]);
-const VOLATILE_USER_FIELDS = new Set(["fva"]);
-
-function canonical(value: unknown, skip?: Set<string>): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => canonical(item)).join(",")}]`;
-  }
-  if (value !== null && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([key, entry]) => !skip?.has(key) && entry !== undefined)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`);
-    return `{${entries.join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-
-function authorizationOf(session: {
-  user?: unknown;
-  [key: string]: unknown;
-}): string {
-  const { user, ...rest } = session;
-  return `${canonical(rest, VOLATILE_SESSION_FIELDS)}|${canonical(user, VOLATILE_USER_FIELDS)}`;
+function authorizationOf(session: { user?: unknown; [key: string]: unknown }) {
+  const { expiresAt: _expiresAt, user, ...rest } = session;
+  const { fva: _fva, ...stableUser } = (user ?? {}) as Record<string, unknown>;
+  return { ...rest, user: stableUser };
 }
 
 /**
@@ -99,5 +81,5 @@ export function sameAuthorization(
   a: { user?: unknown; [key: string]: unknown },
   b: { user?: unknown; [key: string]: unknown },
 ): boolean {
-  return authorizationOf(a) === authorizationOf(b);
+  return isDeepStrictEqual(authorizationOf(a), authorizationOf(b));
 }

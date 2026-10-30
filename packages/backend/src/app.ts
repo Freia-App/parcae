@@ -1440,10 +1440,18 @@ export function createApp(config: AppConfig): ParcaeApp {
           },
         );
         const socketRooms = new SocketSessionRoomManager(socket as any);
+        // Events served under the socket's session: nothing is served once
+        // its credential has lapsed (the controller closes the connection).
+        const listenInSession = (
+          event: string,
+          listener: (...args: any[]) => unknown,
+        ) =>
+          listenSafely(socket, event, (...args: any[]) =>
+            socketSession.expireIfDue() ? undefined : listener(...args),
+          );
 
         // ── RPC: pipe socket calls through Polka's HTTP handler ─────
-        listenSafely(
-          socket,
+        listenInSession(
           "call",
           async (
             requestId: unknown,
@@ -1455,7 +1463,6 @@ export function createApp(config: AppConfig): ParcaeApp {
               log.warn("[socket] call dropped: no usable request id");
               return;
             }
-            if (socketSession.expireIfDue()) return;
             const sessionSnapshot = socketSession.capture();
             if (!sessionSnapshot) {
               const unavailable = createSocketFakeRes(socket, requestId);
@@ -1631,8 +1638,7 @@ export function createApp(config: AppConfig): ParcaeApp {
           ackOf(callback)(await socketSession.renew(payload));
         });
 
-        listenSafely(
-          socket,
+        listenInSession(
           "resync",
           async (
             payload: {
@@ -1653,7 +1659,6 @@ export function createApp(config: AppConfig): ParcaeApp {
             ackCallback: unknown,
           ) => {
             const callback = ackOf(ackCallback);
-            if (socketSession.expireIfDue()) return;
             const entries = Array.isArray(payload?.queries) ? payload.queries : [];
             const sessionSnapshot = socketSession.capture();
             if (!sessionSnapshot) {
@@ -1708,8 +1713,7 @@ export function createApp(config: AppConfig): ParcaeApp {
         // ── route.on() — custom Socket.IO event handlers ──────────
         const socketHandlers = getSocketHandlers();
         for (const entry of socketHandlers) {
-          listenSafely(socket, entry.event, async (data: any) => {
-            if (socketSession.expireIfDue()) return;
+          listenInSession(entry.event, async (data: any) => {
             const sessionSnapshot = socketSession.capture();
             if (!sessionSnapshot) {
               socket.emit("error", {
