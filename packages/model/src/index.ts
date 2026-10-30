@@ -11,6 +11,7 @@ export {
   flushChangeEmits,
   generateId,
   isArrayIndexSegment,
+  isClientWritableKey,
   isUnsafePatchPath,
   Model,
   pathsOverlap,

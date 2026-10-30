@@ -449,6 +449,23 @@ export function isUnsafePatchPath(path: string): boolean {
     .some((segment) => UNSAFE_POINTER_SEGMENTS.has(decodePointerSegment(segment)));
 }
 
+/**
+ * True when a key in a client's write body can name a data field. A `$` key
+ * is a raw-id accessor, a `_` key is framework state, and a name the model
+ * inherits (`constructor`, `__data`, a method, an `Object.prototype` name)
+ * would run a setter or replace the class the adapter reads the table,
+ * schema and hooks from. Undeclared plain names stay writable: they are the
+ * `data` overflow column.
+ */
+export function isClientWritableKey(
+  modelClass: { prototype: object },
+  key: string,
+): boolean {
+  return (
+    !key.startsWith("$") && !key.startsWith("_") && !(key in modelClass.prototype)
+  );
+}
+
 /** Refuse the whole batch if any op's path (or `from`) is unsafe. */
 function assertSafePatchPaths(
   ops: readonly { path: string; from?: string }[],
@@ -1004,6 +1021,11 @@ export class Model extends EventEmitter {
       // in the DB (pre-migration) would clobber the ref state's raw slot
       // through the accessor's setter, wiping the real value.
       if (key.startsWith("$")) continue;
+      // Framework state and inherited names (`constructor`, `__data`,
+      // methods) are never data; assigning one would replace the class
+      // persistence reads or run a setter over the deny-lists.
+      if (INSTANCE_METHODS.has(key) || EVENTEMITTER_KEYS.has(key)) continue;
+      if (key in Object.getPrototypeOf(this)) continue;
       (this as any)[key] = value;
     }
 
@@ -1107,12 +1129,6 @@ export class Model extends EventEmitter {
       }
     }
     return data;
-  }
-
-  set __data(data: Record<string, any>) {
-    for (const [key, value] of Object.entries(data)) {
-      (this as any)[key] = value;
-    }
   }
 
   /** @internal — full RFC 6902 paths currently in-flight via patch() or save() */

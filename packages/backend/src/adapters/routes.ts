@@ -36,7 +36,7 @@
  */
 
 import type { ModelConstructor, ScopeContext } from "@parcae/model";
-import { isUnsafePatchPath, Model } from "@parcae/model";
+import { isClientWritableKey, isUnsafePatchPath, Model } from "@parcae/model";
 import pluralize from "pluralize";
 import { ClientError, json, notFound, forbidden } from "../helpers";
 import { log } from "../logger";
@@ -189,8 +189,9 @@ function readonlyFieldsForCreate(
 
 /**
  * Strip framework-protected and model-protected fields from a client
- * body before they get mass-assigned onto a model instance. Returns
- * a fresh object so the caller's `req.body` isn't mutated.
+ * body before they get mass-assigned onto a model instance, along with
+ * every key that cannot name a data field (`isClientWritableKey`).
+ * Returns a fresh object so the caller's `req.body` isn't mutated.
  */
 function stripReadonly(
   modelClass: ModelConstructor,
@@ -199,7 +200,7 @@ function stripReadonly(
 ): Record<string, any> {
   const out: Record<string, any> = {};
   for (const [key, value] of Object.entries(data)) {
-    if (key.startsWith("$") || deny.has(key)) continue;
+    if (!isClientWritableKey(modelClass, key) || deny.has(key)) continue;
     out[key] = value;
   }
   return out;
@@ -619,7 +620,10 @@ export function registerModelRoutes(
               .split("/")[0]
               ?.replace(/~1/g, "/")
               .replace(/~0/g, "~");
-            if (column && (column.startsWith("$") || deny.has(column))) {
+            if (
+              column &&
+              (!isClientWritableKey(ModelClass, column) || deny.has(column))
+            ) {
               return json(res, 403, {
                 result: null,
                 success: false,
