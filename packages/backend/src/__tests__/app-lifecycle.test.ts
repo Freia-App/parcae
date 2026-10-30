@@ -414,15 +414,20 @@ describe("socket session expiry", () => {
   });
 
   it("reads a session with an unusable expiry as expired", async () => {
-    const controller = createSocketSessionController(
-      "socket",
-      { resolveToken: async () => ({ user: { id: "u1" }, expiresAt: Number.NaN }) } as any,
-      { unsubscribeAll: vi.fn() },
-      undefined,
-      vi.fn(),
-    );
-    await controller.hello({ token: "t" });
-    expect(controller.expireIfDue()).toBe(true);
+    for (const expiresAt of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const onExpired = vi.fn();
+      const controller = createSocketSessionController(
+        "socket",
+        { resolveToken: async () => ({ user: { id: "u1" }, expiresAt }) } as any,
+        { unsubscribeAll: vi.fn() },
+        undefined,
+        onExpired,
+      );
+      await controller.hello({ token: "t" });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(onExpired).toHaveBeenCalledTimes(1);
+      expect(controller.expireIfDue()).toBe(true);
+    }
   });
 });
 
@@ -509,6 +514,65 @@ describe("socket listeners", () => {
       await app.stop();
     }
     expect(escaped).toEqual([]);
+  });
+
+  it("lets a streaming route's timer write after the call and stop on close, without crashing", async () => {
+    vi.useFakeTimers();
+    let wrote = 0;
+    let closed = 0;
+    const streamRoute = async (req: any, res: any) => {
+      res.flushHeaders?.();
+      const heartbeat = setInterval(() => {
+        res.write(": hb\n\n");
+        wrote++;
+      }, 1_000);
+      req.on("close", () => {
+        closed++;
+        clearInterval(heartbeat);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      res.end(JSON.stringify({ result: "done", success: true }));
+    };
+    const { app, listeners, socket } = await connect();
+    // The polka double stands in for routing: every call reaches this route.
+    mocks.servers[0]!.polka.handler.mockImplementation(streamRoute);
+    try {
+      listeners.get("hello")!({ token: null }, vi.fn());
+      await vi.advanceTimersByTimeAsync(0);
+      listeners.get("call")!("req2", "POST", "/v1/stream-test", {});
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(wrote).toBe(2);
+      expect(closed).toBe(1);
+      const [event, frame] = socket.emit.mock.calls.at(-1)!;
+      expect(event).toBe("req2");
+      expect(
+        decompress(JSON.parse(pako.ungzip(frame, { to: "string" }))),
+      ).toMatchObject({ result: "done", success: true });
+    } finally {
+      vi.useRealTimers();
+      await app.stop();
+    }
+  });
+
+  it("closes a call's request when the socket disconnects mid-call", async () => {
+    let closed = 0;
+    const { app, listeners } = await connect();
+    mocks.servers[0]!.polka.handler.mockImplementation(async (req: any) => {
+      req.on("close", () => {
+        closed++;
+      });
+      await new Promise(() => {});
+    });
+    try {
+      listeners.get("hello")!({ token: null }, vi.fn());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      listeners.get("call")!("req3", "POST", "/v1/hang-test", {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      listeners.get("disconnect")!();
+      expect(closed).toBe(1);
+    } finally {
+      await app.stop();
+    }
   });
 
   it("answers a call with a malformed method or path with a 400 on its request id", async () => {

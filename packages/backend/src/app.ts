@@ -13,7 +13,10 @@ import { readdirSync, existsSync } from "node:fs";
 import pako from "pako";
 import { compress } from "compress-json";
 import pluralize from "pluralize";
-import { createSocketFakeRes } from "./socket-fake-res";
+import {
+  createSocketFakeRes,
+  createSocketRequestEvents,
+} from "./socket-fake-res";
 import { SocketSessionReconciler } from "./socket-session-reconciler";
 import {
   ackOf,
@@ -468,10 +471,13 @@ export function createSocketSessionController(
   const reconciler = new SocketSessionReconciler<AuthSession>();
   let expiryTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // A non-numeric expiry from a misbehaving adapter reads as expired.
+  // A non-finite expiry from a misbehaving adapter reads as expired.
   const isExpired = (): boolean => {
     const expiresAt = reconciler.session?.expiresAt;
-    return expiresAt !== undefined && !(Date.now() < expiresAt);
+    return (
+      expiresAt !== undefined &&
+      !(Number.isFinite(expiresAt) && Date.now() < expiresAt)
+    );
   };
   const clearExpiry = () => {
     if (expiryTimer) clearTimeout(expiryTimer);
@@ -1440,6 +1446,8 @@ export function createApp(config: AppConfig): ParcaeApp {
           },
         );
         const socketRooms = new SocketSessionRoomManager(socket as any);
+        // Close callbacks of this socket's calls still in flight.
+        const openRequests = new Set<() => void>();
         // Events served under the socket's session: nothing is served once
         // its credential has lapsed (the controller closes the connection).
         const listenInSession = (
@@ -1550,7 +1558,10 @@ export function createApp(config: AppConfig): ParcaeApp {
               // with querystring.parse(info.query), which destroys complex
               // objects (like __query arrays). We stash the real query in
               // _socketQuery so middleware can restore it.
+              const requestEvents = createSocketRequestEvents();
+              openRequests.add(requestEvents.close);
               const fakeReq: any = {
+                ...requestEvents.methods,
                 method: method.toUpperCase(),
                 url: path,
                 headers: {
@@ -1579,6 +1590,10 @@ export function createApp(config: AppConfig): ParcaeApp {
                 socket,
                 requestId,
                 isSessionCurrent,
+                () => {
+                  openRequests.delete(requestEvents.close);
+                  requestEvents.close();
+                },
               );
 
               // Run through Polka's full handler (includes middleware, auth, auto-CRUD, custom routes)
@@ -1768,6 +1783,8 @@ export function createApp(config: AppConfig): ParcaeApp {
         });
 
         listenSafely(socket, "disconnect", () => {
+          for (const close of [...openRequests]) close();
+          openRequests.clear();
           socketSession.invalidate();
           socketRooms.invalidateSessionOutputs();
           void socketRooms.clearForBoundary().catch(() => {
