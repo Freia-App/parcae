@@ -733,7 +733,8 @@ export class Model extends EventEmitter {
    * Field-level read protection for the default `sanitize()`. Listed
    * columns are stripped from the response shape so a column like
    * `passwordHash` / `apiKey` / `inviteToken` doesn't leak through
-   * the auto-CRUD GET endpoints.
+   * the auto-CRUD GET endpoints. Client queries cannot filter, order
+   * or sum on them either.
    *
    * Subclasses that override `sanitize()` directly bypass this list —
    * they get full control over the shape. This is the safety net for

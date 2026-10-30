@@ -105,7 +105,8 @@ export interface ModelConstructor<T = any> {
    * Field-level read protection. Listed columns are stripped from
    * the default `sanitize()` projection so a column like
    * `passwordHash` / `apiKey` / `inviteToken` doesn't leak through
-   * auto-CRUD GET endpoints.
+   * auto-CRUD GET endpoints, and no client query may filter, order or
+   * sum on them.
    *
    * Subclasses that override `sanitize()` directly bypass this list.
    * Default (empty) means every column is included.
@@ -198,8 +199,9 @@ export interface ModelScope {
    * identical and neither can be probed for.
    *
    * Governs the query surface only; `privateFields` / `sanitize()`
-   * govern the response. A column stripped by `sanitize` usually wants
-   * an entry here too, or it stays readable a bit at a time through
+   * govern the response. `privateFields` are denied here for everyone
+   * already; a column a custom `sanitize` strips wants an entry here
+   * too, or it stays readable a bit at a time through
    * `where('col','ilike','a%')` + `.count()`.
    *
    * @example
