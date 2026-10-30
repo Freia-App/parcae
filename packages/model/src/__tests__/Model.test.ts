@@ -6,6 +6,7 @@ import {
   SYM_VERSION,
   ensureIntermediates,
   generateId,
+  isClientWritableKey,
 } from "../Model";
 import type { ModelOperationsEvent, Ref, WithRefs } from "../Model";
 import type { ModelAdapter, QueryChain } from "../adapters/types";
@@ -1976,5 +1977,58 @@ describe("patch paths cannot reach the shared object prototype", () => {
     const post = Post.hydrate(adapter, { id: "p1", meta: {} });
     await post.patch([{ op: "add", path: "/meta/a/b", value: 1 }]);
     expect((post as any).meta).toEqual({ a: { b: 1 } });
+  });
+});
+
+describe("a write body cannot reach framework state", () => {
+  const BoundPost = Post.bind(createMockAdapter());
+
+  it("isClientWritableKey admits declared and undeclared plain names only", () => {
+    const writable = ["title", "views", "extractedAction"];
+    const refused = [
+      "$title",
+      "_events",
+      "__isNew",
+      "__data",
+      "__proto__",
+      "constructor",
+      "save",
+      "emit",
+      "toString",
+      "hasOwnProperty",
+    ];
+    expect(writable.filter((key) => isClientWritableKey(Post, key))).toEqual(
+      writable,
+    );
+    expect(refused.filter((key) => isClientWritableKey(Post, key))).toEqual([]);
+  });
+
+  it("create skips inherited and framework keys in its data", () => {
+    const post = BoundPost.create({
+      title: "kept",
+      extractedAction: "kept too",
+      constructor: { type: "other" },
+      __isNew: false,
+      __savingCount: 7,
+      __data: { id: "victim", views: 99 },
+      save: 1,
+      _events: {},
+    } as any);
+    expect(post.constructor).toBe(BoundPost);
+    expect(post.title).toBe("kept");
+    expect((post as any).extractedAction).toBe("kept too");
+    expect(post.id).not.toBe("victim");
+    expect(post.views).toBe(0);
+    expect(post.__isNew).toBe(true);
+    expect(post.__savingCount).toBe(0);
+    expect(typeof post.save).toBe("function");
+  });
+
+  it("__data has no setter", () => {
+    const post = BoundPost.create({ title: "before" });
+    expect(() => {
+      (post as any).__data = { title: "after" };
+    }).toThrow(TypeError);
+    expect(post.title).toBe("before");
   });
 });

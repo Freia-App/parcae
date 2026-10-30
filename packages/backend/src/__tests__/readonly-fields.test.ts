@@ -23,11 +23,14 @@ import type { BackendAdapter } from "../adapters/model";
 /**
  * Plain model-class shape. We don't extend the real `Model` so the test
  * stays focused on the route shim's behavior — `Model.create.call(...)`
- * is monkey-patched per-test via the adapter's `query()` stub.
+ * is monkey-patched per-test via the adapter's `query()` stub. Its
+ * `prototype` is Model's, as every real model's chain is, so the routes'
+ * writable-key check sees the framework's own names.
  */
 function makePost(): any {
   const Post: any = {
     type: "post",
+    prototype: Model.prototype,
     scope: {
       // Trivial scopes — every request gets through to the strip/reject
       // logic. Returning `() => {}` for read/update/delete is the
@@ -182,6 +185,7 @@ describe("auto-CRUD readonlyFields", () => {
     // writable because staff set it directly at create time.
     const Appointment: any = {
       type: "appointment",
+      prototype: Model.prototype,
       scope: { create: (ctx: any) => ({ patient: ctx.user?.id }) },
       readonlyFields: [] as readonly string[],
     };
@@ -260,6 +264,7 @@ describe("auto-CRUD readonlyFields", () => {
   it("PUT preserves fields configured as update-only readonly", async () => {
     const PlainPost: any = {
       type: "plainpost",
+      prototype: Model.prototype,
       scope: { update: () => () => {} },
       readonlyFields: [] as readonly string[],
       updateReadonlyFields: ["org", "patient", "user"] as readonly string[],
@@ -301,6 +306,7 @@ describe("auto-CRUD readonlyFields", () => {
   it("PUT resolves update-only readonly fields from request context", async () => {
     const ContextualPost: any = {
       type: "contextualpost",
+      prototype: Model.prototype,
       scope: { update: () => () => {} },
       readonlyFields: [] as readonly string[],
       updateReadonlyFields: (ctx: any) =>
@@ -371,6 +377,7 @@ describe("auto-CRUD readonlyFields", () => {
   it("PUT keeps conventional field names writable unless configured", async () => {
     const PlainPost: any = {
       type: "plainpost",
+      prototype: Model.prototype,
       scope: { update: () => () => {} },
       readonlyFields: [] as readonly string[],
     };
@@ -434,6 +441,90 @@ describe("auto-CRUD readonlyFields", () => {
     // — fail-loud is the desired contract.
     expect(captured.patches).toHaveLength(0);
   });
+
+  it("POST drops keys that cannot name a data field", async () => {
+    const Post = makePost();
+    const { adapter } = makeAdapterStub();
+    const created: Array<Record<string, any>> = [];
+    const create = vi
+      .spyOn(Model, "create")
+      .mockImplementation(function (this: any, data: any) {
+        created.push(data);
+        return { ...data, save: vi.fn(async () => {}) } as any;
+      });
+    registerModelRoutes([Post], adapter);
+
+    const res = makeRes();
+    await findRoute("POST", "/v1/posts")!.handler!(
+      {
+        session: { user: { id: "u1" } },
+        body: JSON.parse(
+          '{"title":"new","extractedAction":"kept","__data":{"id":"victim"},' +
+            '"constructor":{"type":"other"},"__isNew":false,"_events":{},"save":1}',
+        ),
+      },
+      res as any,
+    );
+    create.mockRestore();
+
+    expect(res.captured.status).toBe(201);
+    expect(Object.keys(created[0]!).sort()).toEqual(
+      ["extractedAction", "title", "user"].sort(),
+    );
+  });
+
+  it("PUT drops keys that cannot name a data field", async () => {
+    const Post = makePost();
+    const { adapter, captured, setRow } = makeAdapterStub();
+    setRow({ id: "p1", title: "old", viewCount: 5 });
+    registerModelRoutes([Post], adapter);
+
+    const res = makeRes();
+    await findRoute("PUT", "/v1/posts/:id")!.handler!(
+      {
+        session: { user: { id: "u1" } },
+        params: { id: "p1" },
+        // Parsed from text, as the body parser does, so `constructor`
+        // arrives as an own key.
+        body: JSON.parse(
+          '{"title":"new","extractedAction":"kept","__data":{"viewCount":9999},' +
+            '"constructor":{"type":"other"},"__isNew":true,"toString":"x"}',
+        ),
+      },
+      res as any,
+    );
+
+    expect(res.captured.status).toBe(200);
+    const saved = captured.saves[0]!;
+    expect(saved.title).toBe("new");
+    expect(saved.extractedAction).toBe("kept");
+    expect(saved.__data).toEqual({ id: "p1", title: "old", viewCount: 5 });
+    expect(Object.hasOwn(saved, "constructor")).toBe(false);
+    expect(Object.hasOwn(saved, "__isNew")).toBe(false);
+    expect(Object.hasOwn(saved, "toString")).toBe(false);
+  });
+
+  for (const column of ["__data", "__isNew", "_events", "toString"]) {
+    it(`PATCH rejects an op on ${column} with 403`, async () => {
+      const Post = makePost();
+      const { adapter, captured, setRow } = makeAdapterStub();
+      setRow({ id: "p1", title: "old" });
+      registerModelRoutes([Post], adapter);
+
+      const res = makeRes();
+      await findRoute("PATCH", "/v1/posts/:id")!.handler!(
+        {
+          session: { user: { id: "u1" } },
+          params: { id: "p1" },
+          body: { ops: [{ op: "add", path: `/${column}`, value: { org: "b" } }] },
+        },
+        res as any,
+      );
+
+      expect(res.captured.status).toBe(403);
+      expect(captured.patches).toHaveLength(0);
+    });
+  }
 
   it("PATCH rejects raw ref companion ops with 403", async () => {
     const Post = makePost();
@@ -560,6 +651,7 @@ describe("auto-CRUD readonlyFields", () => {
     // apply.
     const PlainPost: any = {
       type: "plainpost",
+      prototype: Model.prototype,
       scope: {
         patch: () => () => {},
       },
@@ -591,6 +683,7 @@ describe("auto-CRUD readonlyFields", () => {
   it("PATCH rejects fields configured as update-only readonly", async () => {
     const PlainPost: any = {
       type: "plainpost",
+      prototype: Model.prototype,
       scope: { patch: () => () => {} },
       readonlyFields: [] as readonly string[],
       updateReadonlyFields: ["patient"] as readonly string[],
@@ -626,6 +719,7 @@ describe("auto-CRUD readonlyFields", () => {
   it("PATCH resolves update-only readonly fields from request context", async () => {
     const ContextualPost: any = {
       type: "contextualpost",
+      prototype: Model.prototype,
       scope: { patch: () => () => {} },
       readonlyFields: [] as readonly string[],
       updateReadonlyFields: (ctx: any) =>
@@ -671,6 +765,7 @@ describe("auto-CRUD readonlyFields", () => {
   it("PATCH keeps conventional field names writable unless configured", async () => {
     const PlainPost: any = {
       type: "plainpost",
+      prototype: Model.prototype,
       scope: { patch: () => () => {} },
       readonlyFields: [] as readonly string[],
     };
