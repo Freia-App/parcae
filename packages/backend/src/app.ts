@@ -16,12 +16,19 @@ import pluralize from "pluralize";
 import { createSocketFakeRes } from "./socket-fake-res";
 import { SocketSessionReconciler } from "./socket-session-reconciler";
 import {
+  ackOf,
+  isReplyableRequestId,
+  listenSafely,
+  sameAuthorization,
+} from "./socket-guards";
+import {
   SocketSessionRoomManager,
   createSessionFencedEmitter,
   createSessionFencedSocket,
 } from "./socket-session-facade";
 import {
   Model,
+  SESSION_BOUNDARY_CODES,
   SESSION_BOUNDARY_ERRORS,
   sessionBoundaryRefusal,
 } from "@parcae/model";
@@ -448,13 +455,49 @@ interface SocketSessionSubscriptions {
   unsubscribeAll(socketId: string): void;
 }
 
+// setTimeout fires at once past 2^31 - 1 ms, so a far expiry re-arms.
+const MAX_TIMER_MS = 2_147_483_647;
+
 export function createSocketSessionController(
   socketId: string,
   authAdapter: AuthAdapter | null,
   subscriptions: SocketSessionSubscriptions,
   build?: string,
+  onExpired?: () => void,
 ) {
   const reconciler = new SocketSessionReconciler<AuthSession>();
+  let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // A non-numeric expiry from a misbehaving adapter reads as expired.
+  const isExpired = (): boolean => {
+    const expiresAt = reconciler.session?.expiresAt;
+    return expiresAt !== undefined && !(Date.now() < expiresAt);
+  };
+  const clearExpiry = () => {
+    if (expiryTimer) clearTimeout(expiryTimer);
+    expiryTimer = null;
+  };
+  const armExpiry = () => {
+    clearExpiry();
+    const expiresAt = reconciler.session?.expiresAt;
+    if (expiresAt === undefined) return;
+    const delay = Number.isFinite(expiresAt) ? expiresAt - Date.now() : 0;
+    expiryTimer = setTimeout(
+      () => {
+        expiryTimer = null;
+        if (isExpired()) onExpired?.();
+        else armExpiry();
+      },
+      Math.min(Math.max(delay, 0), MAX_TIMER_MS),
+    );
+    expiryTimer.unref?.();
+  };
+  const expiryOf = (session: AuthSession | null) => {
+    const expiresAt = session?.expiresAt;
+    return typeof expiresAt === "number" && Number.isFinite(expiresAt)
+      ? { expiresInMs: Math.max(expiresAt - Date.now(), 0) }
+      : {};
+  };
 
   return {
     get session(): AuthSession | null {
@@ -466,21 +509,39 @@ export function createSocketSessionController(
       reconciler.isOperationCurrent(operation),
     runIfOperationCurrent: (operation: number, action: () => void) =>
       reconciler.runIfOperationCurrent(operation, action),
-    invalidate: () => reconciler.invalidate(),
+    invalidate: () => {
+      clearExpiry();
+      reconciler.invalidate();
+    },
+    /**
+     * True, after handing the socket to `onExpired`, when the session's
+     * credential has lapsed. Every handler checks this before serving.
+     */
+    expireIfDue(): boolean {
+      if (!isExpired()) return false;
+      clearExpiry();
+      onExpired?.();
+      return true;
+    },
     async hello(
-      payload: { token?: string | null } | null | undefined,
-      callback?: (result: { userId: string | null; build?: string }) => void,
+      payload: unknown,
+      callback?: (result: {
+        userId: string | null;
+        build?: string;
+        expiresInMs?: number;
+      }) => void,
       onBoundary?: () => Promise<void>,
     ): Promise<void> {
-      const token = payload?.token ?? null;
+      const token = (payload as { token?: unknown } | null)?.token;
       const result = await reconciler.reconcile(async () => {
+        clearExpiry();
         // reconcile() has already cleared the published session, so an
         // RPC dispatched during token resolution can never be served as
         // the prior owner. Drop that owner's subscriptions and finish
         // its room/ack cleanup before the next session becomes visible.
         subscriptions.unsubscribeAll(socketId);
         await onBoundary?.();
-        if (authAdapter && token) {
+        if (authAdapter && typeof token === "string" && token) {
           try {
             return await authAdapter.resolveToken(token);
           } catch {
@@ -489,9 +550,52 @@ export function createSocketSessionController(
         }
         return null;
       });
+      if (result.applied) armExpiry();
       const session = result.applied ? result.session : reconciler.session;
       const userId = session?.user?.id ?? null;
-      callback?.(build === undefined ? { userId } : { userId, build });
+      callback?.({
+        userId,
+        ...(build === undefined ? {} : { build }),
+        ...expiryOf(session),
+      });
+    },
+    /**
+     * Extend the session with a fresh token for the same authorization,
+     * keeping its subscriptions. Anything else (another user, org, role or
+     * claim, or a token that no longer resolves) is refused, and the client
+     * falls back to a full hello.
+     */
+    async renew(
+      payload: unknown,
+    ): Promise<
+      | { success: true; userId: string; expiresInMs?: number }
+      | { success: false; error: string; code: string }
+    > {
+      const refused = {
+        success: false as const,
+        error: SESSION_BOUNDARY_ERRORS.changed,
+        code: SESSION_BOUNDARY_CODES.changed,
+      };
+      const token = (payload as { token?: unknown } | null)?.token;
+      const snapshot = reconciler.capture();
+      if (!authAdapter || !snapshot?.session || typeof token !== "string") {
+        return refused;
+      }
+      let next: AuthSession | null = null;
+      try {
+        next = await authAdapter.resolveToken(token);
+      } catch {
+        next = null;
+      }
+      if (
+        !next ||
+        !sameAuthorization(snapshot.session, next) ||
+        !reconciler.replace(snapshot, next)
+      ) {
+        return refused;
+      }
+      armExpiry();
+      return { success: true, userId: next.user.id, ...expiryOf(next) };
     },
   };
 }
@@ -1326,18 +1430,32 @@ export function createApp(config: AppConfig): ParcaeApp {
           authAdapter,
           subscriptions,
           config.build,
+          // Close the engine connection rather than send a Socket.IO
+          // disconnect: every client version reconnects after a transport
+          // close and says hello with a fresh token, while a server
+          // disconnect leaves socket.io-client offline for good.
+          () => {
+            log.info("[socket] session expired, closing the connection");
+            socket.conn.close();
+          },
         );
         const socketRooms = new SocketSessionRoomManager(socket as any);
 
         // ── RPC: pipe socket calls through Polka's HTTP handler ─────
-        socket.on(
+        listenSafely(
+          socket,
           "call",
           async (
-            requestId: string,
-            method: string,
-            path: string,
+            requestId: unknown,
+            method: unknown,
+            path: unknown,
             data: any,
           ) => {
+            if (!isReplyableRequestId(requestId)) {
+              log.warn("[socket] call dropped: no usable request id");
+              return;
+            }
+            if (socketSession.expireIfDue()) return;
             const sessionSnapshot = socketSession.capture();
             if (!sessionSnapshot) {
               const unavailable = createSocketFakeRes(socket, requestId);
@@ -1354,6 +1472,22 @@ export function createApp(config: AppConfig): ParcaeApp {
             const sessionOperation = sessionSnapshot.operation;
             const isSessionCurrent = () =>
               socketSession.isOperationCurrent(sessionOperation);
+            if (typeof method !== "string" || typeof path !== "string") {
+              const malformed = createSocketFakeRes(
+                socket,
+                requestId,
+                isSessionCurrent,
+              );
+              malformed.writeHead(400);
+              malformed.end(
+                JSON.stringify({
+                  result: null,
+                  success: false,
+                  error: "A call needs a string method and path",
+                }),
+              );
+              return;
+            }
 
             // Replay guard. The SDK re-sends an un-acked call after a
             // reconnect under its original id. A mutation the server
@@ -1475,25 +1609,30 @@ export function createApp(config: AppConfig): ParcaeApp {
         // us its live cache entries; we re-evaluate each query
         // against the DB and re-bind subscriptions on the new socket
         // id. One round trip restores N queries.
-        socket.on(
-          "hello",
-          async (payload: { token?: string | null }, callback: any) => {
-            try {
-              await socketSession.hello(payload, callback, () =>
-                socketRooms.clearForBoundary(),
-              );
-            } catch {
-              // Failing open would publish the next session while prior
-              // room membership or ack closures may still be live.
-              socketSession.invalidate();
-              log.error("[socket] auth-boundary room cleanup failed");
-              callback?.({ userId: null });
-              socket.disconnect(true);
-            }
-          },
-        );
+        listenSafely(socket, "hello", async (payload: unknown, callback: unknown) => {
+          const ack = ackOf(callback);
+          try {
+            await socketSession.hello(payload, ack, () =>
+              socketRooms.clearForBoundary(),
+            );
+          } catch {
+            // Failing open would publish the next session while prior
+            // room membership or ack closures may still be live.
+            socketSession.invalidate();
+            log.error("[socket] auth-boundary room cleanup failed");
+            ack({ userId: null });
+            socket.disconnect(true);
+          }
+        });
 
-        socket.on(
+        // A token rotation for the same authorization. The SDK renews
+        // before the session's expiry so subscriptions survive it.
+        listenSafely(socket, "renew", async (payload: unknown, callback: unknown) => {
+          ackOf(callback)(await socketSession.renew(payload));
+        });
+
+        listenSafely(
+          socket,
           "resync",
           async (
             payload: {
@@ -1511,8 +1650,10 @@ export function createApp(config: AppConfig): ParcaeApp {
                 subscribe?: boolean;
               }>;
             },
-            callback: any,
+            ackCallback: unknown,
           ) => {
+            const callback = ackOf(ackCallback);
+            if (socketSession.expireIfDue()) return;
             const entries = Array.isArray(payload?.queries) ? payload.queries : [];
             const sessionSnapshot = socketSession.capture();
             if (!sessionSnapshot) {
@@ -1567,7 +1708,8 @@ export function createApp(config: AppConfig): ParcaeApp {
         // ── route.on() — custom Socket.IO event handlers ──────────
         const socketHandlers = getSocketHandlers();
         for (const entry of socketHandlers) {
-          socket.on(entry.event, async (data: any) => {
+          listenSafely(socket, entry.event, async (data: any) => {
+            if (socketSession.expireIfDue()) return;
             const sessionSnapshot = socketSession.capture();
             if (!sessionSnapshot) {
               socket.emit("error", {
@@ -1617,11 +1759,11 @@ export function createApp(config: AppConfig): ParcaeApp {
         }
 
         // Query subscriptions
-        socket.on("unsubscribe:query", (hash: string) => {
-          subscriptions.unsubscribe(socket.id, hash);
+        listenSafely(socket, "unsubscribe:query", (hash: unknown) => {
+          if (typeof hash === "string") subscriptions.unsubscribe(socket.id, hash);
         });
 
-        socket.on("disconnect", () => {
+        listenSafely(socket, "disconnect", () => {
           socketSession.invalidate();
           socketRooms.invalidateSessionOutputs();
           void socketRooms.clearForBoundary().catch(() => {

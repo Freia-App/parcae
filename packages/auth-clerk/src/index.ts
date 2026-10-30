@@ -308,6 +308,8 @@ export function clerk(config: ClerkConfig): AuthAdapter {
         ...extras,
         ...(Array.isArray(fva) && fva.length === 2 && { fva }),
       },
+      // verifyToken has checked exp; a socket session ends with it.
+      ...(typeof payload.exp === "number" && { expiresAt: payload.exp * 1000 }),
     };
   }
 
