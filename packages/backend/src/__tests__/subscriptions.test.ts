@@ -420,7 +420,8 @@ describe("QuerySubscriptionManager", () => {
         {
           refField: "file",
           targetType: "file",
-          targetClass: class File {},
+          // Expansion loads only what the target's read scope admits.
+          targetClass: { type: "file", scope: { read: () => ({}) } },
           projection: null,
         },
       ];
@@ -1249,7 +1250,7 @@ describe("QuerySubscriptionManager", () => {
         {
           refField: "file",
           targetType: "file",
-          targetClass: { type: "file" },
+          targetClass: { type: "file", scope: { read: () => ({}) } },
           projection: null,
         },
       ];
@@ -1271,9 +1272,11 @@ describe("QuerySubscriptionManager", () => {
 
       expect(tracked.calls).toEqual({ find: 1, first: [] });
       expect(adapter.batchFindByType).not.toHaveBeenCalled();
-      expect(adapter.batchFindByTypeOnWrite).toHaveBeenCalledWith("file", [
-        "f1",
-      ]);
+      expect(adapter.batchFindByTypeOnWrite).toHaveBeenCalledWith(
+        "file",
+        ["f1"],
+        {},
+      );
       expect(emitted[0]!.data.ops).toEqual([
         {
           op: "update",

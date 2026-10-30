@@ -1,6 +1,6 @@
 /**
  * `scope.fields` evaluation — which columns a request context may name
- * in a query.
+ * in a query — and `scope.read` for the ref targets it reaches.
  *
  * Pure policy over a model's static scope: no adapter, no I/O. It sits
  * on its own so the two consumers share one definition — the query
@@ -38,6 +38,25 @@ export function deniedFields(
   return denied;
 }
 
+/** A `scope.read` result that admits rows: a query modifier or a where object. */
+export type ReadScope = ((qb: any) => any) | Record<string, any>;
+
+/**
+ * The rows of `target` that `ctx` may read directly, as its `scope.read`
+ * returns them, or null when it may read none. A model with no
+ * `scope.read` has no read route, so a ref into it reaches nothing
+ * either; no `ctx` denies for the same fail-closed reason as
+ * {@link deniedFields}.
+ */
+export function readScopeFor(
+  target: ModelConstructor<any>,
+  ctx?: ScopeContext,
+): ReadScope | null {
+  const read = target.scope?.read;
+  if (!read || !ctx) return null;
+  return read(ctx) || null;
+}
+
 /**
  * Field policy for one client-query replay. `own` is the queried
  * model's denied columns; `forTarget` resolves a ref target's, so
@@ -46,6 +65,11 @@ export function deniedFields(
 export interface FieldPolicy {
   own: ReadonlySet<string>;
   forTarget(target: ModelConstructor<any>): ReadonlySet<string>;
+  /**
+   * The rows of a ref target this ctx may reach through a ref filter.
+   * Absent off the client path, where trusted code filters unscoped.
+   */
+  readScope?(target: ModelConstructor<any>): ReadScope | null;
 }
 
 /**
@@ -60,6 +84,7 @@ export function fieldPolicyFor(
   return {
     own: deniedFields(modelClass, ctx),
     forTarget: (target) => deniedFields(target, ctx),
+    readScope: (target) => readScopeFor(target, ctx),
   };
 }
 

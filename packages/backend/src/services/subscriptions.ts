@@ -34,7 +34,7 @@ import {
 } from "@parcae/model";
 import fastJsonPatch from "fast-json-patch";
 import type { Operation } from "fast-json-patch";
-import { RefLoader } from "./ref-loader";
+import type { ReadScope } from "./field-policy";
 import {
   getWireRefId,
   hydrateExpansions,
@@ -1277,28 +1277,30 @@ export class QuerySubscriptionManager {
   ): Promise<void> {
     if (expand.length === 0 || wireRows.length === 0) return;
 
-    // Build an ephemeral RefLoader pointed at the adapter's batch
-    // entrypoint. This runs OUTSIDE a request scope (re-eval fires
-    // on `onModelChange`, which has no AsyncLocalStorage frame), so
-    // we can't reuse `getRefLoader()`. The per-reeval loader still
-    // collapses every ref-id-per-row into one query per target
-    // type via the same microtask batching.
+    // Re-eval fires on `onModelChange`, outside any request, so the
+    // load goes straight to the adapter's primary-backed batch.
     const adapter = this._queryAdapter(query);
     const batch =
       adapter?.batchFindByTypeOnWrite ?? adapter?.batchFindByType;
     if (!batch) return;
-    const loader = new RefLoader((type, ids) => batch.call(adapter, type, ids));
-    await hydrateExpansions(wireRows, expand, loader, user ?? undefined);
+    await hydrateExpansions(
+      wireRows,
+      expand,
+      (type, ids, scope) => batch.call(adapter, type, ids, scope),
+      user ?? undefined,
+    );
   }
 
   private _queryAdapter(query: QueryChain<any>): {
     batchFindByType?: (
       type: string,
       ids: string[],
+      scope?: ReadScope,
     ) => Promise<Map<string, any>>;
     batchFindByTypeOnWrite?: (
       type: string,
       ids: string[],
+      scope?: ReadScope,
     ) => Promise<Map<string, any>>;
     executeSubscriptionQuery?: (query: QueryChain<any>) => Promise<any[]>;
   } | null {

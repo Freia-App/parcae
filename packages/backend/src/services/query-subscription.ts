@@ -53,7 +53,6 @@ import type {
 } from "@parcae/model";
 import { extractExpandFields, stripExpandSteps } from "@parcae/model";
 import type { BackendAdapter } from "../adapters/model";
-import { getRefLoader } from "./context";
 import { deniedFields } from "./field-policy";
 import {
   hydrateExpansions,
@@ -273,13 +272,12 @@ export async function runQueryStatic(
   );
 
   if (expandResolved.length > 0) {
-    const loader = getRefLoader();
-    if (loader) {
-      await hydrateExpansions(items, expandResolved, loader, user);
-    }
-    // No RefLoader → rows go out un-expanded. Mirrors
-    // `runQuerySubscription`'s behaviour — only happens for paths
-    // that bypass `runWithRequestContext`.
+    await hydrateExpansions(
+      items,
+      expandResolved,
+      (type, ids, scope) => opts.adapter.batchFindByType(type, ids, scope),
+      user,
+    );
   }
 
   return { items, totalCount };

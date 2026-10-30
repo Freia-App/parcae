@@ -15,13 +15,13 @@
  *   - Unknown projected target field → 400 (when target schema known).
  *   - `hashKey` is stable + order-independent + projection-aware.
  *   - `hydrateExpansions` preserves `$<ref>` and replaces `<ref>`
- *     with the embedded shape, batched through RefLoader.
+ *     with the embedded shape, one load per target type under the
+ *     target's `scope.read`.
  */
 
 import { describe, expect, it, vi } from "vitest";
 import { Model, type Ref } from "@parcae/model";
 import { ClientError } from "../helpers";
-import { RefLoader } from "../services/ref-loader";
 import {
   expandHashKey,
   hydrateExpansions,
@@ -33,8 +33,12 @@ import {
 
 // ─── Test fixtures ───────────────────────────────────────────────────────────
 
+// Every caller reads every file and user; the scope tests swap in their own.
+const READ_ALL = { read: () => ({}) };
+
 class FileModel extends Model {
   static override type = "file";
+  static override scope = READ_ALL;
   static override __schema = {
     url: "string",
     mime: "string",
@@ -47,6 +51,7 @@ class FileModel extends Model {
 
 class UserModel extends Model {
   static override type = "user";
+  static override scope = READ_ALL;
   static override __schema = { name: "string" } as any;
   name: string = "";
 }
@@ -279,7 +284,7 @@ describe("hydrateExpansions", () => {
       }
       return m;
     });
-    const loader = new RefLoader(loadByIds);
+    const loader = loadByIds;
 
     const resolved: ResolvedExpand[] = [
       {
@@ -306,11 +311,11 @@ describe("hydrateExpansions", () => {
 
   it("projects to the requested fields, always including id + type", async () => {
     const items: any[] = [{ id: "a1", type: "asset", file: "f1" }];
-    const loader = new RefLoader(async (_type, ids) => {
+    const loader = async (_type: string, ids: string[]) => {
       const m = new Map<string, unknown>();
       for (const id of ids) m.set(id, buildFile(id, "https://x", "image/png"));
       return m;
-    });
+    };
     const resolved: ResolvedExpand[] = [
       {
         refField: "file",
@@ -336,14 +341,14 @@ describe("hydrateExpansions", () => {
     ];
     const loadByIds = vi.fn(async (_type: string, ids: string[]) => {
       const m = new Map<string, unknown>();
-      // RefLoader dedupes; we should only see "f1" once.
+      // Ids are deduped; we should only see "f1" once.
       expect(ids).toEqual(["f1"]);
       for (const id of ids) {
         m.set(id, buildFile(id, "https://x", "image/png"));
       }
       return m;
     });
-    const loader = new RefLoader(loadByIds);
+    const loader = loadByIds;
     await hydrateExpansions(
       items,
       [
@@ -363,7 +368,7 @@ describe("hydrateExpansions", () => {
 
   it("nulls the ref when the linked row is missing, but still stamps $<ref>", async () => {
     const items: any[] = [{ id: "a1", type: "asset", file: "ghost" }];
-    const loader = new RefLoader(async () => new Map());
+    const loader = async () => new Map<string, unknown>();
     await hydrateExpansions(
       items,
       [
@@ -383,8 +388,8 @@ describe("hydrateExpansions", () => {
 
   it("nulls the ref AND stamps $<ref>: null when the row has no ref id", async () => {
     const items: any[] = [{ id: "a1", type: "asset", file: "" }];
-    const loadByIds = vi.fn(async () => new Map());
-    const loader = new RefLoader(loadByIds);
+    const loadByIds = vi.fn(async () => new Map<string, unknown>());
+    const loader = loadByIds;
     await hydrateExpansions(
       items,
       [
@@ -403,7 +408,7 @@ describe("hydrateExpansions", () => {
     expect(loadByIds).not.toHaveBeenCalled();
   });
 
-  it("batches all refs of the same type across distinct ref fields in one RefLoader flush", async () => {
+  it("loads all refs of the same type across distinct ref fields in one query", async () => {
     // asset has two ref fields onto user (`owner`) and file (`file`).
     // Hydrating both should coalesce per type — 1 query for users,
     // 1 query for files, regardless of how many ref fields point at
@@ -424,7 +429,7 @@ describe("hydrateExpansions", () => {
       }
       return m;
     });
-    const loader = new RefLoader(loadByIds);
+    const loader = loadByIds;
     await hydrateExpansions(
       items,
       [
@@ -451,11 +456,74 @@ describe("hydrateExpansions", () => {
   });
 });
 
+describe("hydrateExpansions scopes each target", () => {
+  const OWN_ROWS = { owner: "u1" };
+  class NoteModel extends Model {
+    static override type = "note";
+    static override scope = {
+      read: (ctx: any) => (ctx.user?.id === "u1" ? OWN_ROWS : null),
+    };
+    static override __schema = { body: "string" } as any;
+    body: string = "";
+  }
+  class LogModel extends Model {
+    static override type = "log";
+    static override __schema = { body: "string" } as any;
+    body: string = "";
+  }
+  const expandOf = (target: any): ResolvedExpand[] => [
+    { refField: "ref", targetType: target.type, targetClass: target, projection: null },
+  ];
+  const loadAll = (target: any) =>
+    vi.fn(async (_type: string, ids: string[], _scope: unknown) => {
+      const m = new Map<string, unknown>();
+      for (const id of ids) m.set(id, target.hydrate({} as any, { id, body: "secret" }));
+      return m;
+    });
+
+  it("loads under the target's scope.read for the requesting user", async () => {
+    const load = loadAll(NoteModel);
+    const items: any[] = [{ id: "a1", type: "asset", ref: "n1" }];
+    await hydrateExpansions(items, expandOf(NoteModel), load, { id: "u1" });
+    expect(load).toHaveBeenCalledWith("note", ["n1"], OWN_ROWS);
+    expect(items[0]!.ref).toMatchObject({ id: "n1", body: "secret" });
+  });
+
+  it("expands to null, without a load, when the target's scope denies the user", async () => {
+    const load = loadAll(NoteModel);
+    const items: any[] = [{ id: "a1", type: "asset", ref: "n1" }];
+    await hydrateExpansions(items, expandOf(NoteModel), load, { id: "u2" });
+    expect(load).not.toHaveBeenCalled();
+    expect(items[0]!.ref).toBeNull();
+    expect(items[0]!.$ref).toBe("n1");
+  });
+
+  it("expands to null when the target has no read scope at all", async () => {
+    const load = loadAll(LogModel);
+    const items: any[] = [{ id: "a1", type: "asset", ref: "l1" }];
+    await hydrateExpansions(items, expandOf(LogModel), load, { id: "u1" });
+    expect(load).not.toHaveBeenCalled();
+    expect(items[0]!.ref).toBeNull();
+  });
+
+  it("expands to null when the scoped load leaves the row out", async () => {
+    const items: any[] = [{ id: "a1", type: "asset", ref: "n2" }];
+    await hydrateExpansions(
+      items,
+      expandOf(NoteModel),
+      async () => new Map<string, unknown>(),
+      { id: "u1" },
+    );
+    expect(items[0]!.ref).toBeNull();
+    expect(items[0]!.$ref).toBe("n2");
+  });
+});
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 function buildFile(id: string, url: string, mime: string): FileModel {
   // `hydrate` is the same factory the adapter uses on a real SQL row.
-  // Don't bother with a real adapter — RefLoader handlers only need
+  // Don't bother with a real adapter — the loads only need
   // the resulting object to have `sanitize()` (Model's default
   // implementation).
   return FileModel.hydrate({} as any, { id, url, mime, bytes: 0 }) as FileModel;
