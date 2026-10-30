@@ -1016,16 +1016,11 @@ export class Model extends EventEmitter {
     for (const [key, value] of Object.entries(data)) {
       if (SYSTEM_DATA_KEYS.has(key)) continue;
       if (refFields.has(key)) continue;
-      // Skip `$`-prefixed keys — these are runtime raw-id accessors
-      // installed by _installRefField. A stale `$user` column lingering
-      // in the DB (pre-migration) would clobber the ref state's raw slot
-      // through the accessor's setter, wiping the real value.
-      if (key.startsWith("$")) continue;
-      // Framework state and inherited names (`constructor`, `__data`,
-      // methods) are never data; assigning one would replace the class
-      // persistence reads or run a setter over the deny-lists.
-      if (INSTANCE_METHODS.has(key) || EVENTEMITTER_KEYS.has(key)) continue;
-      if (key in Object.getPrototypeOf(this)) continue;
+      // A `$` key would write through a raw-id accessor and clobber the
+      // ref just installed (a stale `$user` column does this); a `_` or
+      // inherited name (`__isNew`, `constructor`, `__data`) is framework
+      // state, not data.
+      if (!isClientWritableKey(this.constructor as typeof Model, key)) continue;
       (this as any)[key] = value;
     }
 
