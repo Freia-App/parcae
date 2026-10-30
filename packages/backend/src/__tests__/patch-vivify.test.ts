@@ -578,6 +578,15 @@ describe("BackendAdapter.patch — paths cannot reach the shared object prototyp
     });
   }
 
+  it("refuses an inherited name as a column with a 400", async () => {
+    await expect(
+      adapter.patch(makeModel(), [
+        { op: "replace", path: "/toString", value: 1 } as any,
+      ]),
+    ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/unknown column/) });
+    expect(capture.updates).toHaveLength(0);
+  });
+
   it("follows only own properties when checking which intermediates exist", async () => {
     const inherited = Object.create({ abc: { shots: [] } });
     await adapter.patch(makeModel("p1", inherited), [
