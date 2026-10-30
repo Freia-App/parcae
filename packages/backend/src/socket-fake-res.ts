@@ -57,7 +57,17 @@ export function createSocketFakeRes(
     end(body?: string) {
       if (this.writableEnded) return;
       this.writableEnded = true;
-      onEnd?.();
+      // Close listeners run after the reply, so one that throws cannot
+      // swallow it.
+      try {
+        reply(this.statusCode, body);
+      } finally {
+        onEnd?.();
+      }
+    },
+  };
+
+  function reply(statusCode: number, body?: string) {
       // A response computed under a prior session must never reach the
       // socket after an auth boundary; the state flip above still lets
       // middleware short-circuit checks observe a finished response.
@@ -70,19 +80,18 @@ export function createSocketFakeRes(
         }
       }
       if (
-        this.statusCode >= 400 &&
+        statusCode >= 400 &&
         responseBody &&
         typeof responseBody === "object" &&
         !Array.isArray(responseBody)
       ) {
-        responseBody = { ...responseBody, status: this.statusCode };
+        responseBody = { ...responseBody, status: statusCode };
       }
       const compressed = pako.gzip(
         JSON.stringify(compress(responseBody ?? { result: null, success: true })),
       );
       socket.emit(requestId, compressed);
-    },
-  };
+  }
 }
 
 /**

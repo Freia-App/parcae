@@ -1783,14 +1783,15 @@ export function createApp(config: AppConfig): ParcaeApp {
         });
 
         listenSafely(socket, "disconnect", () => {
-          for (const close of [...openRequests]) close();
-          openRequests.clear();
           socketSession.invalidate();
           socketRooms.invalidateSessionOutputs();
           void socketRooms.clearForBoundary().catch(() => {
             log.warn("[socket] disconnect room cleanup failed");
           });
           subscriptions.unsubscribeAll(socket.id);
+          // Last, so a throwing close listener cannot skip the cleanup above.
+          for (const close of [...openRequests]) close();
+          openRequests.clear();
         });
       });
 
