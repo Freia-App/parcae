@@ -1,6 +1,6 @@
 /**
  * `scope.fields` evaluation — which columns a request context may name
- * in a query.
+ * in a query — and `scope.read` for the ref targets it reaches.
  *
  * Pure policy over a model's static scope: no adapter, no I/O. It sits
  * on its own so the two consumers share one definition — the query
@@ -10,7 +10,11 @@
  * adapter interface every mock has to satisfy.
  */
 
-import type { ModelConstructor, ScopeContext } from "@parcae/model";
+import type {
+  ModelConstructor,
+  ScopeContext,
+  ScopeResult,
+} from "@parcae/model";
 
 /** Shared empty result for models with no `scope.fields` policy. */
 const EMPTY: ReadonlySet<string> = new Set<string>();
@@ -38,6 +42,25 @@ export function deniedFields(
   return denied;
 }
 
+/** A `scope.read` result that admits rows: a query modifier or a where object. */
+export type ReadScope = NonNullable<ScopeResult>;
+
+/**
+ * The rows of `target` that `ctx` may read directly, as its `scope.read`
+ * returns them, or null when it may read none. A model with no
+ * `scope.read` has no read route, so a ref into it reaches nothing
+ * either; no `ctx` denies for the same fail-closed reason as
+ * {@link deniedFields}.
+ */
+export function readScopeFor(
+  target: ModelConstructor<any>,
+  ctx?: ScopeContext,
+): ReadScope | null {
+  const read = target.scope?.read;
+  if (!read || !ctx) return null;
+  return read(ctx) || null;
+}
+
 /**
  * Field policy for one client-query replay. `own` is the queried
  * model's denied columns; `forTarget` resolves a ref target's, so
@@ -46,6 +69,12 @@ export function deniedFields(
 export interface FieldPolicy {
   own: ReadonlySet<string>;
   forTarget(target: ModelConstructor<any>): ReadonlySet<string>;
+  /**
+   * The rows of a ref target this ctx may reach through a ref filter:
+   * null refuses the filter, undefined (trusted code only) leaves it
+   * unscoped.
+   */
+  readScope(target: ModelConstructor<any>): ReadScope | null | undefined;
 }
 
 /**
@@ -60,6 +89,7 @@ export function fieldPolicyFor(
   return {
     own: deniedFields(modelClass, ctx),
     forTarget: (target) => deniedFields(target, ctx),
+    readScope: (target) => readScopeFor(target, ctx),
   };
 }
 
@@ -67,4 +97,5 @@ export function fieldPolicyFor(
 export const NO_FIELD_POLICY: FieldPolicy = {
   own: EMPTY,
   forTarget: () => EMPTY,
+  readScope: () => undefined,
 };

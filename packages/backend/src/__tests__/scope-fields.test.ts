@@ -4,8 +4,9 @@
  * dot-notation.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
-import type { BackendAdapter } from "../adapters/model";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import knexFactory from "knex";
+import { BackendAdapter } from "../adapters/model";
 import { prepareClientQuery } from "../services/query-subscription";
 import { ClientError } from "../helpers";
 import type { QueryStep } from "@parcae/model";
@@ -297,5 +298,68 @@ describe("scope.fields — aggregate columns", () => {
       ctx: ANON,
     });
     expect(prep.denied.size).toBe(0);
+  });
+});
+
+describe("ref dot-notation — the target's read scope", () => {
+  // A clinic's result, behind an alert the caller's clinic can read.
+  const ResultModel = createMockModel(
+    "result",
+    { org: "string", source: "string" },
+    {
+      scope: {
+        read: (ctx: any) =>
+          ctx.user?.org ? (qb: any) => qb.where("org", ctx.user.org) : null,
+      },
+    },
+  );
+  const SecretModel = createMockModel("secret", { body: "string" });
+  const AlertModel = createMockModel("alert", {
+    result: { kind: "ref", target: ResultModel },
+    secret: { kind: "ref", target: SecretModel },
+  } as any);
+  const CLINIC_A = { user: { id: "u1", org: "a" }, params: {}, data: {} };
+
+  let knex: ReturnType<typeof knexFactory>;
+  let adapter: BackendAdapter;
+  beforeEach(() => {
+    knex = knexFactory({ client: "pg" });
+    adapter = new BackendAdapter({ read: knex, write: knex });
+    registerTestModels(adapter, { result: ResultModel, secret: SecretModel });
+  });
+  afterEach(() => knex.destroy());
+
+  const sqlOf = (steps: QueryStep[], ctx: any) =>
+    (adapter.queryFromClient(AlertModel, {}, steps, ctx) as any).exec().toSQL();
+
+  it("matches only target rows the caller could read directly", () => {
+    const compiled = sqlOf(
+      [{ method: "where", args: ["result.source", "lab"] }],
+      CLINIC_A,
+    );
+    expect(compiled.sql).toContain(
+      '"result" in (select "id" from "results" where ("org" = ?) and "source" = ?)',
+    );
+    expect(compiled.bindings).toEqual(expect.arrayContaining(["a", "lab"]));
+  });
+
+  it("refuses a filter into a target the caller cannot read", () => {
+    expect(() =>
+      sqlOf([{ method: "where", args: ["result.source", "lab"] }], ANON),
+    ).toThrow('Invalid column "source" on referenced model "result"');
+    expect(() =>
+      sqlOf([{ method: "where", args: ["secret.body", "x"] }], CLINIC_A),
+    ).toThrow('Invalid column "body" on referenced model "secret"');
+  });
+
+  it("leaves server-side chains unscoped", () => {
+    const compiled = (adapter as any)
+      ._buildQuery(AlertModel, knex("alerts"))
+      .where("result.source", "lab")
+      .exec()
+      .toSQL();
+    expect(compiled.sql).toContain(
+      '"result" in (select "id" from "results" where "source" = ?)',
+    );
   });
 });

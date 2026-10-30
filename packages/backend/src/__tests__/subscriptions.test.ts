@@ -422,6 +422,7 @@ describe("QuerySubscriptionManager", () => {
           targetType: "file",
           targetClass: class File {},
           projection: null,
+          readScope: {},
         },
       ];
       const sub = await manager.subscribe({
@@ -1251,6 +1252,7 @@ describe("QuerySubscriptionManager", () => {
           targetType: "file",
           targetClass: { type: "file" },
           projection: null,
+          readScope: {},
         },
       ];
       await manager.subscribe({
@@ -1271,9 +1273,11 @@ describe("QuerySubscriptionManager", () => {
 
       expect(tracked.calls).toEqual({ find: 1, first: [] });
       expect(adapter.batchFindByType).not.toHaveBeenCalled();
-      expect(adapter.batchFindByTypeOnWrite).toHaveBeenCalledWith("file", [
-        "f1",
-      ]);
+      expect(adapter.batchFindByTypeOnWrite).toHaveBeenCalledWith(
+        "file",
+        ["f1"],
+        {},
+      );
       expect(emitted[0]!.data.ops).toEqual([
         {
           op: "update",

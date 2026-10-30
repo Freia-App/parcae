@@ -62,6 +62,7 @@ export type {
   SchemaDefinition,
   ColumnType,
   ScopeContext,
+  ScopeResult,
   PatchOp,
 } from "./adapters/types";
 

@@ -34,6 +34,7 @@ import {
   fieldPolicyFor,
   NO_FIELD_POLICY,
   type FieldPolicy,
+  type ReadScope,
 } from "../services/field-policy";
 import equal from "deep-equal";
 import fastJsonPatch from "fast-json-patch";
@@ -831,26 +832,31 @@ export class BackendAdapter implements ModelAdapter {
    * This is the batch entry point the request-scoped `RefLoader`
    * calls; it's also useful directly when you have a known list of
    * ids and want to avoid the per-id round-trip dance manually.
+   * `scope` narrows the load to the rows a `scope.read` result admits,
+   * which is how a client's expand loads its targets.
    */
   async batchFindByType(
     type: string,
     ids: string[],
+    scope?: ReadScope,
   ): Promise<Map<string, any>> {
-    return this._batchFindByType(this.read, type, ids);
+    return this._batchFindByType(this.read, type, ids, scope);
   }
 
   /** @internal Primary-backed ref hydration for subscription caches. */
   async batchFindByTypeOnWrite(
     type: string,
     ids: string[],
+    scope?: ReadScope,
   ): Promise<Map<string, any>> {
-    return this._batchFindByType(this.write, type, ids);
+    return this._batchFindByType(this.write, type, ids, scope);
   }
 
   private async _batchFindByType(
     db: any,
     type: string,
     ids: string[],
+    scope?: ReadScope,
   ): Promise<Map<string, any>> {
     const result = new Map<string, any>();
     if (ids.length === 0) return result;
@@ -859,9 +865,9 @@ export class BackendAdapter implements ModelAdapter {
     if (!modelClass) return result;
 
     const uniqueIds = Array.from(new Set(ids));
-    const rows = await db(tableName(modelClass))
-      .select("*")
-      .whereIn("id", uniqueIds);
+    const query = db(tableName(modelClass)).select("*").whereIn("id", uniqueIds);
+    if (scope) query.where(scope);
+    const rows = await query;
     for (const row of rows ?? []) {
       const hydrated = hydrate(modelClass, this, row);
       result.set((hydrated as any).id, hydrated);
@@ -1445,26 +1451,28 @@ export class BackendAdapter implements ModelAdapter {
     // Validate the nested column exists on the target — and that this
     // ctx may reference it. The TARGET's `scope.fields` decides, not
     // the queried model's, or the subquery becomes a side door around
-    // a field withheld on the target.
-    if (targetSchema) {
-      const targetValidColumns = new Set([
-        "id",
-        "createdAt",
-        "updatedAt",
-        ...Object.keys(targetSchema),
-      ]);
-      if (
-        !targetValidColumns.has(refColumn) ||
-        policy.forTarget(resolvedTarget).has(refColumn)
-      ) {
-        throw new ClientError(
-          `Invalid column "${refColumn}" on referenced model "${targetType}"`,
-        );
-      }
+    // a field withheld on the target. The TARGET's `scope.read` bounds
+    // the subquery to rows this ctx could read directly, or a row it can
+    // read confirms another tenant's value; a target it cannot read is
+    // refused like a column it cannot name.
+    const readScope = policy.readScope(resolvedTarget);
+    const targetValidColumns = targetSchema
+      ? new Set(["id", "createdAt", "updatedAt", ...Object.keys(targetSchema)])
+      : null;
+    if (
+      readScope === null ||
+      (targetValidColumns &&
+        (!targetValidColumns.has(refColumn) ||
+          policy.forTarget(resolvedTarget).has(refColumn)))
+    ) {
+      throw new ClientError(
+        `Invalid column "${refColumn}" on referenced model "${targetType}"`,
+      );
     }
 
     // Build the subquery: SELECT id FROM <target_table> WHERE <refColumn> ...
     const subquery = this.read(targetTable).select("id");
+    if (readScope) subquery.where(readScope);
 
     const method = step.method;
 

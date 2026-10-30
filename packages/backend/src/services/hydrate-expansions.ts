@@ -14,10 +14,10 @@
  *     { id: "pa_abc", file: { type: "file", id: "f_xyz", url: "...", ... },
  *       $file: "f_xyz", ... }
  *
- * Batching is delegated to the request-scoped `RefLoader`
- * (`services/ref-loader.ts`) — one `WHERE id IN (...)` per ref-type
- * regardless of how many rows or how many distinct ref fields are
- * being expanded.
+ * Loading is one `WHERE id IN (...)` per ref-type regardless of how
+ * many rows or how many distinct ref fields are being expanded, under
+ * the target's `scope.read` for the requesting user: an expanded ref
+ * carries only a row the caller could read directly, else `null`.
  *
  * Projection: `.expand("file.url")` instead of `.expand("file")`
  * trims the embedded object to `{ id, type, url }`. Mixing a bare
@@ -47,9 +47,21 @@
 import type {
   ModelConstructor,
   SchemaDefinition,
+  ScopeContext,
 } from "@parcae/model";
 import { ClientError } from "../helpers";
-import type { RefLoader } from "./ref-loader";
+import { readScopeFor, type ReadScope } from "./field-policy";
+
+/**
+ * Loads the rows of one model `type` among `ids` that `scope` admits,
+ * keyed by id: `BackendAdapter.batchFindByType` (or its primary-backed
+ * twin for subscription caches).
+ */
+export type ScopedBatchLoad = (
+  type: string,
+  ids: string[],
+  scope: ReadScope,
+) => Promise<Map<string, unknown>>;
 
 // ─── Spec parsing ────────────────────────────────────────────────────────────
 
@@ -133,7 +145,7 @@ export function parseExpandSpecs(
 
 /**
  * One validated expand directive: which field on the parent model,
- * which target model class to batch-load via `RefLoader`, which
+ * which target model class to batch-load, which
  * fields to project (empty Set ⇒ whole row).
  */
 export interface ResolvedExpand {
@@ -141,6 +153,8 @@ export interface ResolvedExpand {
   targetType: string;
   targetClass: ModelConstructor;
   projection: ReadonlySet<string> | null; // null ⇒ whole-row
+  /** The target rows the caller may read; null expands every ref to null. */
+  readScope: ReadScope | null;
 }
 
 /**
@@ -152,11 +166,14 @@ export interface ResolvedExpand {
  * `models` is the adapter's `_models` registry (type → constructor).
  * We accept it as a `Map` rather than coupling to BackendAdapter so
  * tests can build a minimal stub without spinning up an adapter.
+ * `ctx` is the request's scope context: each target's `scope.read`
+ * for it bounds what the expand may load.
  */
 export function validateExpandSpecs(
   specs: ExpandSpec,
   modelClass: ModelConstructor,
   models: ReadonlyMap<string, ModelConstructor>,
+  ctx?: ScopeContext,
 ): ResolvedExpand[] {
   if (specs.size === 0) return [];
   const schema =
@@ -210,6 +227,7 @@ export function validateExpandSpecs(
       targetType,
       targetClass,
       projection: field.whole ? null : new Set(field.fields),
+      readScope: readScopeFor(targetClass, ctx),
     });
   }
   return resolved;
@@ -298,77 +316,62 @@ function projectFields(
  * preserved at `$<refField>` so the frontend's `(file, $file)`
  * accessor pair still works regardless of expansion.
  *
- * Loading goes through the request-scoped `RefLoader`: every
- * `loader.load(targetType, id)` call lands in the same microtask
- * batch and resolves through one `WHERE id IN (...)` per target
- * type. With N=100 rows expanding `file`, this is 1 query, not N.
- *
- * `sanitizeUser` is the request's user (for honouring `privateFields`
- * / self-vs-other projections on the target's `sanitize()`). The
- * route handler already has it.
+ * Each target loads under the `readScope` `validateExpandSpecs`
+ * resolved for the caller, so a ref to a row the caller cannot read,
+ * or into a model with no read scope, comes back `null` exactly like
+ * a ref to a missing row. The loaded row then goes through the
+ * target's `sanitize(user)`.
  */
 export async function hydrateExpansions(
   items: WireRow[],
   resolved: readonly ResolvedExpand[],
-  loader: RefLoader,
-  sanitizeUser: { id: string } | null | undefined,
+  load: ScopedBatchLoad,
+  user: { id: string } | null | undefined,
 ): Promise<void> {
   if (items.length === 0 || resolved.length === 0) return;
 
-  // Step 1: enqueue every (type, id) we need. RefLoader coalesces
-  // the per-type batches into one query each — the awaits below
-  // join the same scheduled microtask.
-  const perFieldPromises = new Map<string, Promise<unknown>[]>();
-  const idsPerField = new Map<string, (string | null)[]>();
+  // One scoped load per target type, however many ref fields share it.
+  const byType = new Map<string, { scope: ReadScope | null; ids: Set<string> }>();
   for (const exp of resolved) {
-    const idList: (string | null)[] = [];
-    const promises: Promise<unknown>[] = [];
+    let entry = byType.get(exp.targetType);
+    if (!entry) {
+      entry = { scope: exp.readScope, ids: new Set() };
+      byType.set(exp.targetType, entry);
+    }
     for (const row of items) {
       const id = getWireRefId(row, exp.refField);
-      idList.push(id);
-      promises.push(loader.load(exp.targetType, id));
+      if (id) entry.ids.add(id);
     }
-    perFieldPromises.set(exp.refField, promises);
-    idsPerField.set(exp.refField, idList);
   }
-
-  // Step 2: settle the batches in parallel.
+  const loaded = new Map<string, Map<string, unknown>>();
   await Promise.all(
-    Array.from(perFieldPromises.values()).flat(),
+    Array.from(byType, async ([type, { scope, ids }]) => {
+      loaded.set(
+        type,
+        scope && ids.size > 0
+          ? await load(type, Array.from(ids), scope)
+          : new Map(),
+      );
+    }),
   );
 
-  // Step 3: write the embedded objects back. We re-await the
-  // already-settled promises (sync at this point) so per-row
-  // failures inside one expansion don't poison sibling expansions.
   for (const exp of resolved) {
-    const promises = perFieldPromises.get(exp.refField)!;
-    const idList = idsPerField.get(exp.refField)!;
-    for (let i = 0; i < items.length; i++) {
-      const row = items[i]!;
-      const refId = idList[i];
-
-      // Always stamp $<refField> with the raw id so frontend code
-      // that reads `row.$file` (the accessor pair) keeps working
-      // regardless of expansion. The bare `<refField>` slot then
-      // holds the embedded object.
-      row[`$${exp.refField}`] = refId ?? null;
-
-      if (!refId) {
-        row[exp.refField] = null;
-        continue;
-      }
-      const loaded = (await promises[i]) as
-        | { sanitize?: (user?: { id: string }) => Promise<Record<string, any>>; __data?: Record<string, any> }
-        | null;
-      if (!loaded) {
-        row[exp.refField] = null;
-        continue;
-      }
-      const sanitized = await projectForWire(loaded, sanitizeUser);
-      row[exp.refField] = exp.projection
-        ? projectFields(sanitized, exp.projection)
-        : sanitized;
-    }
+    const rows = loaded.get(exp.targetType)!;
+    await Promise.all(
+      items.map(async (row) => {
+        const refId = getWireRefId(row, exp.refField);
+        row[`$${exp.refField}`] = refId;
+        const target = refId ? rows.get(refId) : undefined;
+        if (!target) {
+          row[exp.refField] = null;
+          return;
+        }
+        const sanitized = await projectForWire(target, user);
+        row[exp.refField] = exp.projection
+          ? projectFields(sanitized, exp.projection)
+          : sanitized;
+      }),
+    );
   }
 }
 

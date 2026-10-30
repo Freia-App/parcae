@@ -53,7 +53,6 @@ import type {
 } from "@parcae/model";
 import { extractExpandFields, stripExpandSteps } from "@parcae/model";
 import type { BackendAdapter } from "../adapters/model";
-import { getRefLoader } from "./context";
 import { deniedFields } from "./field-policy";
 import {
   hydrateExpansions,
@@ -143,14 +142,15 @@ export function prepareClientQuery(
 
   // Peel `.expand(...)` projections off the recorded steps before SQL
   // replay. Expand is a wire-shape directive, not a SQL operation;
-  // callers apply it after the row set lands (via `RefLoader` for
-  // immediate responses; via the subscription manager's per-emit
-  // hydrate for ongoing diffs).
+  // callers apply it after the row set lands (`hydrateExpansions`, for
+  // immediate responses and on every subscription emit), each target
+  // under its `scope.read` for this ctx.
   const expandSpecs = parseExpandSpecs(extractExpandFields(normalised));
   const expandResolved = validateExpandSpecs(
     expandSpecs,
     ModelClass,
     modelByType,
+    ctx,
   );
   const steps = ensureIdSelected(
     expandResolved.length > 0 ? stripExpandSteps(normalised) : normalised,
@@ -273,13 +273,12 @@ export async function runQueryStatic(
   );
 
   if (expandResolved.length > 0) {
-    const loader = getRefLoader();
-    if (loader) {
-      await hydrateExpansions(items, expandResolved, loader, user);
-    }
-    // No RefLoader → rows go out un-expanded. Mirrors
-    // `runQuerySubscription`'s behaviour — only happens for paths
-    // that bypass `runWithRequestContext`.
+    await hydrateExpansions(
+      items,
+      expandResolved,
+      (type, ids, scope) => opts.adapter.batchFindByType(type, ids, scope),
+      user,
+    );
   }
 
   return { items, totalCount };

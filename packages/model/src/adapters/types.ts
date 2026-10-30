@@ -312,8 +312,9 @@ export interface QueryChain<T> {
   from(table: string): QueryChain<T>;
 
   /**
-   * Inline named ref fields in the LIST response, batched on the
-   * backend via the request-scoped `RefLoader`.
+   * Inline named ref fields in the LIST response, one backend query per
+   * target type under the target's `scope.read` for the caller: a ref to
+   * a row the caller could not read directly comes back `null`.
    *
    * Without `.expand(...)`, ref columns serialize as raw id strings;
    * the client has to round-trip `findById` per row to paint anything.
