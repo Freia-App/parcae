@@ -954,6 +954,19 @@ export class BackendAdapter implements ModelAdapter {
   ]);
 
   /**
+   * The methods Knex reads an object first arg as `{ col: value }` and a
+   * callback as a parenthesised group. Every other column method reads
+   * an object as `{ alias: col }` and a callback as a subquery on the
+   * outer row, so only a string column is accepted there.
+   */
+  private static OBJECT_WHERE_METHODS = new Set([
+    "where",
+    "andWhere",
+    "orWhere",
+    "whereNot",
+  ]);
+
+  /**
    * Pagination methods: clamped or injected at the top level of the
    * replay loop, and excluded entirely inside `__nested` groups (limit
    * and offset would replay unclamped there; clearLimit doesn't exist
@@ -1310,12 +1323,13 @@ export class BackendAdapter implements ModelAdapter {
     // Serialized as: { __nested: [{ method, args }, ...] }
     if (BackendAdapter.COLUMN_ARG_METHODS.has(step.method)) {
       const firstArg = args[0];
-
-      if (
+      const objectWhere =
+        BackendAdapter.OBJECT_WHERE_METHODS.has(step.method) &&
         typeof firstArg === "object" &&
         firstArg !== null &&
-        Array.isArray(firstArg.__nested)
-      ) {
+        !Array.isArray(firstArg);
+
+      if (objectWhere && Array.isArray(firstArg.__nested)) {
         const nestedSteps: QueryStep[] = firstArg.__nested;
         // Replace with a Knex builder callback. Pagination methods are
         // excluded inside the group: limit/offset would replay verbatim
@@ -1362,11 +1376,7 @@ export class BackendAdapter implements ModelAdapter {
             throw new ClientError(`Invalid operator "${args[1]}"`);
           }
         }
-      } else if (
-        typeof firstArg === "object" &&
-        firstArg !== null &&
-        !Array.isArray(firstArg)
-      ) {
+      } else if (objectWhere) {
         // Object form: where({ col1: val, col2: val })
         for (const key of Object.keys(firstArg)) {
           if (!validColumns.has(key) || policy.own.has(key)) {
@@ -1375,14 +1385,22 @@ export class BackendAdapter implements ModelAdapter {
             );
           }
         }
+      } else if (!(step.method === "orderBy" && firstArg === false)) {
+        // An array is a column list to Knex, and anything else is no
+        // column at all; neither went through the checks above.
+        throw new ClientError(`Invalid column argument to ${step.method}`);
       }
     }
 
-    // select: validate all column names
+    // select: every column a plain name, so no alias can rename a
+    // private field past sanitize(), which drops it by name.
     if (step.method === "select") {
-      const cols = Array.isArray(args[0]) ? args[0] : args;
+      const cols = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
       for (const col of cols) {
-        if (typeof col === "string" && col !== "*" && !validColumns.has(col)) {
+        if (typeof col !== "string") {
+          throw new ClientError(`Invalid select column on model "${modelType}"`);
+        }
+        if (col !== "*" && !validColumns.has(col)) {
           throw new ClientError(
             `Invalid column "${col}" on model "${modelType}"`,
           );

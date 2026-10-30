@@ -251,6 +251,123 @@ describe("BackendAdapter.queryFromClient", () => {
     });
   });
 
+  // ── Non-string column forms ───────────────────────────────────────
+  // Knex reads an object as alias -> column and an array as a column list,
+  // so either form names columns the string check never saw.
+
+  describe("non-string column forms", () => {
+    const run = (steps: QueryStep[]) =>
+      adapter.queryFromClient(ProjectModel, { userId: "u1" }, steps);
+
+    it("rejects a select alias object, even onto a valid column", () => {
+      expect(() =>
+        run([{ method: "select", args: [{ label: "passwordHash" }] }]),
+      ).toThrow('Invalid select column on model "project"');
+      expect(() =>
+        run([{ method: "select", args: ["id", { name: "status" }] }]),
+      ).toThrow('Invalid select column on model "project"');
+    });
+
+    it("rejects an object inside a select array", () => {
+      expect(() =>
+        run([{ method: "select", args: [["id", { label: "passwordHash" }]] }]),
+      ).toThrow('Invalid select column on model "project"');
+    });
+
+    it("still replays a select of one string array", () => {
+      run([{ method: "select", args: [["id", "name"]] }]);
+      expect(calls[1]).toEqual({ method: "select", args: [["id", "name"]] });
+    });
+
+    for (const method of [
+      "where",
+      "andWhere",
+      "orWhere",
+      "whereIn",
+      "whereNot",
+      "whereNotIn",
+      "whereNull",
+      "whereNotNull",
+      "whereBetween",
+      "orderBy",
+    ]) {
+      it(`rejects an array column in ${method}`, () => {
+        expect(() =>
+          run([{ method, args: [["passwordHash"], [["x"]]] }]),
+        ).toThrow(`Invalid column argument to ${method}`);
+        expect(() =>
+          run([{ method, args: [[{ column: "passwordHash" }]] }]),
+        ).toThrow(`Invalid column argument to ${method}`);
+      });
+
+      it(`rejects a number, boolean or null column in ${method}`, () => {
+        for (const column of [1, true, null]) {
+          expect(() => run([{ method, args: [column, "x"] }])).toThrow(
+            `Invalid column argument to ${method}`,
+          );
+        }
+      });
+    }
+
+    // Object-where is a Knex shape only for these; elsewhere the object's
+    // values are read as columns behind keys that pass the check.
+    for (const method of [
+      "whereIn",
+      "whereNotIn",
+      "whereNull",
+      "whereNotNull",
+      "whereBetween",
+      "orderBy",
+    ]) {
+      it(`rejects an object column in ${method}`, () => {
+        expect(() =>
+          run([{ method, args: [{ name: "passwordHash" }, ["x"]] }]),
+        ).toThrow(`Invalid column argument to ${method}`);
+      });
+    }
+
+    it("rejects an array column inside a nested group", () => {
+      const nested = createTestAdapter({ invoke: "all" }).adapter;
+      expect(() =>
+        nested.queryFromClient(ProjectModel, { userId: "u1" }, [
+          {
+            method: "where",
+            args: [
+              {
+                __nested: [
+                  { method: "whereIn", args: [["passwordHash"], [["x"]]] },
+                ],
+              },
+            ],
+          },
+        ]),
+      ).toThrow("Invalid column argument to whereIn");
+    });
+
+    // A group in a column position compiles to a correlated subquery, so a
+    // nested select reads the outer row's column: `(select "x") in (...)`.
+    for (const method of ["whereIn", "whereNull", "orderBy"]) {
+      it(`rejects a nested group as the column of ${method}`, () => {
+        expect(() =>
+          run([
+            {
+              method,
+              args: [
+                { __nested: [{ method: "select", args: ["status"] }] },
+                ["x"],
+              ],
+            },
+          ]),
+        ).toThrow(`Invalid column argument to ${method}`);
+      });
+    }
+
+    it("still replays orderBy(false), the order opt-out", () => {
+      run([{ method: "orderBy", args: [false] }]);
+      expect(calls[1]).toEqual({ method: "orderBy", args: [false] });
+    });
+  });
+
   // ── Operator Validation ───────────────────────────────────────────
 
   describe("operator validation", () => {

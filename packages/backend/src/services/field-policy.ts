@@ -16,7 +16,9 @@ import type { ModelConstructor, ScopeContext } from "@parcae/model";
 const EMPTY: ReadonlySet<string> = new Set<string>();
 
 /**
- * Columns `ctx` may not reference in a query.
+ * Columns `ctx` may not reference in a query: the `privateFields`, which
+ * `sanitize()` strips from every reply so a filter on one is the only
+ * way to read it, and each `scope.fields` entry whose predicate fails.
  *
  * No `ctx` denies every policied column outright rather than
  * evaluating the predicates against an empty one — `(ctx) =>
@@ -27,11 +29,11 @@ export function deniedFields(
   ctx?: ScopeContext,
 ): ReadonlySet<string> {
   const fields = modelClass.scope?.fields;
-  if (!fields) return EMPTY;
-  if (!ctx) return new Set(Object.keys(fields));
-  const denied = new Set<string>();
-  for (const name of Object.keys(fields)) {
-    if (!fields[name]!(ctx)) denied.add(name);
+  const privateFields = modelClass.privateFields ?? [];
+  if (!fields && privateFields.length === 0) return EMPTY;
+  const denied = new Set<string>(privateFields);
+  for (const name of Object.keys(fields ?? {})) {
+    if (!ctx || !fields![name]!(ctx)) denied.add(name);
   }
   return denied;
 }

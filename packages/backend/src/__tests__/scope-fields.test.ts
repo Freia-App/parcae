@@ -153,6 +153,64 @@ describe("scope.fields — direct column references", () => {
   });
 });
 
+// `sanitize()` strips a private field from every row, so a filter or order
+// on it is the only way left to read it, a guess at a time.
+describe("privateFields — withheld from the query surface", () => {
+  let adapter: BackendAdapter;
+
+  beforeEach(() => {
+    adapter = createTestAdapter({ invoke: "all" }).adapter;
+    registerTestModels(adapter, { key: KeyModel });
+  });
+
+  const KeyModel = createMockModel(
+    "key",
+    { name: "string", secret: "string" },
+    { scope: { read: () => () => {} }, privateFields: ["secret"] },
+  );
+
+  const run = (model: any, steps: QueryStep[]) =>
+    (adapter as any).queryFromClient(model, {}, steps, SIGNED_IN);
+
+  it("rejects a private column in a filter, a prefix probe and an order", () => {
+    for (const step of [
+      { method: "where", args: ["secret", "x"] },
+      { method: "where", args: ["secret", "like", "a%"] },
+      { method: "where", args: [{ secret: "x" }] },
+      { method: "orderBy", args: ["secret", "asc"] },
+    ]) {
+      expect(() => run(KeyModel, [step])).toThrow('Invalid column "secret"');
+    }
+  });
+
+  it("rejects a private column through a ref", () => {
+    const Grant = createMockModel("grant", {
+      key: { kind: "ref", target: KeyModel },
+    } as any);
+    expect(() =>
+      run(Grant, [{ method: "where", args: ["key.secret", "x"] }]),
+    ).toThrow('Invalid column "secret" on referenced model "key"');
+  });
+
+  it("still allows selecting it by name, which sanitize strips", () => {
+    expect(() =>
+      run(KeyModel, [{ method: "select", args: ["id", "secret"] }]),
+    ).not.toThrow();
+  });
+
+  it("is in the denied set routes check their own column against", () => {
+    const prep = prepareClientQuery({
+      ModelClass: KeyModel,
+      scopeResult: {},
+      rawSteps: [],
+      modelByType: new Map(),
+      adapter,
+      ctx: SIGNED_IN,
+    });
+    expect([...prep.denied]).toEqual(["secret"]);
+  });
+});
+
 describe("scope.fields — through a ref (dot-notation)", () => {
   let adapter: BackendAdapter;
 
