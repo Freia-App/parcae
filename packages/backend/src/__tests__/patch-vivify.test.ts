@@ -539,3 +539,60 @@ describe("BackendAdapter._patchPostgres — vivification shape (DOL-553)", () =>
     expect(capture.lastBindingsFor("blocks")).toEqual(['{"next":true}']);
   });
 });
+
+describe("BackendAdapter.patch — paths cannot reach the shared object prototype", () => {
+  let adapter: BackendAdapter;
+  let capture: KnexCapture;
+  const probe = "parcaeAdapterPatchProbe";
+
+  function prototypeUntouched(): boolean {
+    const touched = Object.hasOwn(Object.prototype, probe);
+    delete (Object.prototype as any)[probe];
+    return !touched;
+  }
+
+  beforeEach(() => {
+    clearHooks();
+    const stub = createKnexStub();
+    adapter = new BackendAdapter({ read: stub.knex, write: stub.knex });
+    adapter.engine = "postgres";
+    capture = stub.capture;
+  });
+
+  afterEach(() => {
+    clearHooks();
+  });
+
+  for (const path of [
+    `/blocks/__proto__/${probe}/leaf`,
+    `/__proto__/${probe}/leaf`,
+    `/constructor/prototype/${probe}`,
+    `/blocks/constructor/prototype/${probe}/leaf`,
+  ]) {
+    it(`rejects ${path} with a 400 before any walk or SQL`, async () => {
+      await expect(
+        adapter.patch(makeModel(), [{ op: "add", path, value: 1 } as any]),
+      ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/unsafe/) });
+      expect(prototypeUntouched()).toBe(true);
+      expect(capture.updates).toHaveLength(0);
+    });
+  }
+
+  it("refuses an inherited name as a column with a 400", async () => {
+    await expect(
+      adapter.patch(makeModel(), [
+        { op: "replace", path: "/toString", value: 1 } as any,
+      ]),
+    ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/unknown column/) });
+    expect(capture.updates).toHaveLength(0);
+  });
+
+  it("follows only own properties when checking which intermediates exist", async () => {
+    const inherited = Object.create({ abc: { shots: [] } });
+    await adapter.patch(makeModel("p1", inherited), [
+      { op: "add", path: "/blocks/abc/shots/0", value: 1 } as any,
+    ]);
+    // `abc` is inherited, not on the row, so its ensure must still be emitted.
+    expect(capture.lastBindingsFor("blocks")).toContainEqual(["abc"]);
+  });
+});

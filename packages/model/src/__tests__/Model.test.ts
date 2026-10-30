@@ -4,6 +4,7 @@ import {
   SYM_SERVER_MERGE,
   SYM_SERVER_PATCH,
   SYM_VERSION,
+  ensureIntermediates,
   generateId,
 } from "../Model";
 import type { ModelOperationsEvent, Ref, WithRefs } from "../Model";
@@ -1918,5 +1919,62 @@ describe("subscription frames around the client's own writes", () => {
     } finally {
       adapter.patch = originalPatch;
     }
+  });
+});
+
+describe("patch paths cannot reach the shared object prototype", () => {
+  const adapter = createMockAdapter();
+  const probe = "parcaePatchProbe";
+  const unsafePaths = [
+    `/meta/__proto__/${probe}/leaf`,
+    `/__proto__/${probe}/leaf`,
+    `/meta/constructor/prototype/${probe}/leaf`,
+  ];
+
+  function prototypeUntouched(): boolean {
+    const touched = Object.hasOwn(Object.prototype, probe);
+    delete (Object.prototype as any)[probe];
+    return !touched;
+  }
+
+  for (const path of unsafePaths) {
+    it(`patch rejects ${path} before any write`, async () => {
+      const post = Post.hydrate(adapter, { id: "p1", meta: {} });
+      await expect(
+        Promise.resolve().then(() => post.patch([{ op: "add", path, value: 1 }])),
+      ).rejects.toThrow(/unsafe/);
+      expect(prototypeUntouched()).toBe(true);
+      expect(adapter.patched).toHaveLength(0);
+    });
+
+    it(`a server frame for ${path} is refused`, () => {
+      const post = Post.hydrate(adapter, { id: "p1", meta: {} });
+      expect(() =>
+        post[SYM_SERVER_PATCH]([{ op: "add", path, value: 1 }]),
+      ).toThrow(/unsafe/);
+      expect(prototypeUntouched()).toBe(true);
+    });
+  }
+
+  it("ensureIntermediates refuses an unsafe segment", () => {
+    expect(() =>
+      ensureIntermediates({}, [{ path: `/__proto__/${probe}/leaf` }]),
+    ).toThrow(/unsafe/);
+    expect(prototypeUntouched()).toBe(true);
+  });
+
+  it("ensureIntermediates follows only own properties", () => {
+    const parent = { inherited: { kept: true } };
+    const doc = Object.create(parent);
+    ensureIntermediates(doc, [{ path: "/inherited/child" }]);
+    expect(Object.hasOwn(doc, "inherited")).toBe(true);
+    expect(doc.inherited).toEqual({});
+    expect(parent.inherited).toEqual({ kept: true });
+  });
+
+  it("still patches ordinary nested paths", async () => {
+    const post = Post.hydrate(adapter, { id: "p1", meta: {} });
+    await post.patch([{ op: "add", path: "/meta/a/b", value: 1 }]);
+    expect((post as any).meta).toEqual({ a: { b: 1 } });
   });
 });
