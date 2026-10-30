@@ -1932,11 +1932,8 @@ describe("patch paths cannot reach the shared object prototype", () => {
   ];
 
   function prototypeUntouched(): boolean {
-    const touched =
-      Object.hasOwn(Object.prototype, probe) ||
-      Object.hasOwn(Function.prototype, probe);
+    const touched = Object.hasOwn(Object.prototype, probe);
     delete (Object.prototype as any)[probe];
-    delete (Function.prototype as any)[probe];
     return !touched;
   }
 

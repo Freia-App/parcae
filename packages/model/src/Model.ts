@@ -454,8 +454,8 @@ function assertSafePatchPaths(
   ops: readonly { path: string; from?: string }[],
 ): void {
   for (const op of ops) {
-    for (const path of op.from === undefined ? [op.path] : [op.path, op.from]) {
-      if (isUnsafePatchPath(path)) {
+    for (const path of [op.path, op.from]) {
+      if (path !== undefined && isUnsafePatchPath(path)) {
         throw new Error(`patch: unsafe path "${path}"`);
       }
     }

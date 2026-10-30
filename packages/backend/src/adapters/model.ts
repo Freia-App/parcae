@@ -2129,14 +2129,11 @@ export class BackendAdapter implements ModelAdapter {
       let parent = state;
       for (let i = 0; i < segments.length - 1; i++) {
         const segment = segments[i]!;
-        if (
-          !Object.hasOwn(parent, segment) ||
-          parent[segment] == null ||
-          typeof parent[segment] !== "object"
-        ) {
-          parent[segment] = isArrayIndexSegment(segments[i + 1]) ? [] : {};
+        let next = Object.hasOwn(parent, segment) ? parent[segment] : undefined;
+        if (next == null || typeof next !== "object") {
+          next = parent[segment] = isArrayIndexSegment(segments[i + 1]) ? [] : {};
         }
-        parent = parent[segment];
+        parent = next;
       }
       applyPatch(state, [op], false, true);
     }
