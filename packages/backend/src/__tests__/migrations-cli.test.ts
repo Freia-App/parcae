@@ -653,4 +653,55 @@ describe("pgConnectionFromUrl", () => {
     ) as { ssl: boolean };
     expect(cfg.ssl).toBe(true);
   });
+
+  it("keeps verified TLS for every sslmode that asks for TLS", () => {
+    const modes = ["prefer", "allow", "require", "verify-ca", "verify-full"];
+    const ssl = Object.fromEntries(
+      modes.map((mode) => [
+        mode,
+        (pgConnectionFromUrl(`postgres://a:b@h/d?sslmode=${mode}`) as {
+          ssl?: unknown;
+        }).ssl,
+      ]),
+    );
+    expect(ssl).toEqual({
+      prefer: true,
+      allow: true,
+      require: true,
+      "verify-ca": true,
+      "verify-full": true,
+    });
+  });
+
+  it("connects without TLS only when sslmode=disable or nothing is asked", () => {
+    expect(
+      (pgConnectionFromUrl("postgres://a:b@h/d?sslmode=disable") as {
+        ssl?: unknown;
+      }).ssl,
+    ).toBeUndefined();
+    expect(
+      (pgConnectionFromUrl("postgres://a:b@h/d") as { ssl?: unknown }).ssl,
+    ).toBeUndefined();
+  });
+
+  it("keeps ssl=no-verify as unverified TLS", () => {
+    expect(
+      (pgConnectionFromUrl("postgres://a:b@h/d?sslmode=no-verify") as {
+        ssl?: unknown;
+      }).ssl,
+    ).toEqual({ rejectUnauthorized: false });
+  });
+
+  it("refuses an sslmode it does not know rather than dropping TLS", () => {
+    expect(() =>
+      pgConnectionFromUrl("postgres://a:b@h/d?sslmode=verify-everything"),
+    ).toThrow(/sslmode/);
+  });
+
+  it("honours channel_binding=require", () => {
+    const cfg = pgConnectionFromUrl(
+      "postgres://a:b@h/d?sslmode=require&channel_binding=require",
+    ) as { enableChannelBinding?: boolean };
+    expect(cfg.enableChannelBinding).toBe(true);
+  });
 });
