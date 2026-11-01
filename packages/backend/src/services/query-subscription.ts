@@ -51,8 +51,13 @@ import type {
   QueryChain,
   ScopeContext,
 } from "@parcae/model";
-import { extractExpandFields, stripExpandSteps } from "@parcae/model";
+import {
+  extractExpandFields,
+  SESSION_BOUNDARY_ERRORS,
+  stripExpandSteps,
+} from "@parcae/model";
 import type { BackendAdapter } from "../adapters/model";
+import { ClientError } from "../helpers";
 import { deniedFields } from "./field-policy";
 import {
   hydrateExpansions,
@@ -191,6 +196,14 @@ export interface RunQuerySubscriptionOptions {
    * first reconnect ack.
    */
   force?: boolean;
+  /**
+   * Whether the socket session that asked is still the socket's session.
+   * Checked just before the subscription registers: one registered after a
+   * `hello` boundary would carry the previous owner's scope into the next
+   * session, after the boundary's `unsubscribeAll` has already run, so
+   * nothing would ever drop it.
+   */
+  isSessionCurrent: () => boolean;
 }
 
 export interface RunQuerySubscriptionResult {
@@ -217,6 +230,11 @@ export async function runQuerySubscription(
 
   const { query, countQuery, expandResolved, steps } = prep;
 
+  // Synchronous up to `subscribe` reading the socket's generation, so a
+  // boundary after this check is still caught by the manager's own fence.
+  if (!opts.isSessionCurrent()) {
+    throw new ClientError(SESSION_BOUNDARY_ERRORS.changed, 409);
+  }
   const [sub, totalCount] = await Promise.all([
     adapter.subscriptions.subscribe(
       { socketId, query, expand: expandResolved, steps, user },

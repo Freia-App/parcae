@@ -449,6 +449,8 @@ interface ResyncEntry {
 interface ResyncOptions {
   maxEntries?: number;
   concurrency?: number;
+  /** The resync's session operation is still the socket's (`runQuerySubscription`). */
+  isSessionCurrent: () => boolean;
 }
 
 const DEFAULT_MAX_RESYNC_QUERIES = 100;
@@ -621,7 +623,7 @@ export async function resyncQueries(
   socketSession: AuthSession | null,
   entries: ResyncEntry[],
   adapter: BackendAdapter,
-  options: ResyncOptions = {},
+  options: ResyncOptions,
 ): Promise<Array<{ key: string; hash: string | null; items: any[]; totalCount: number }>> {
   const maxEntries = parsePositiveInteger(
     options.maxEntries ?? DEFAULT_MAX_RESYNC_QUERIES,
@@ -698,6 +700,7 @@ export async function resyncQueries(
             socketId,
             user,
             adapter,
+            isSessionCurrent: options.isSessionCurrent,
           });
           return { key: entry.key, hash, items, totalCount };
         },
@@ -1575,6 +1578,7 @@ export function createApp(config: AppConfig): ParcaeApp {
                 session: sessionSnapshot.session,
                 _socketRpc: true, // marker: skip auth middleware resolution
                 _socketId: socket.id,
+                _isSessionCurrent: isSessionCurrent,
                 _parsedUrl: { pathname, query: qs || "", _raw: path },
               };
 
@@ -1697,6 +1701,8 @@ export function createApp(config: AppConfig): ParcaeApp {
                 {
                   maxEntries: maxResyncQueries,
                   concurrency: resyncConcurrency,
+                  isSessionCurrent: () =>
+                    socketSession.isOperationCurrent(sessionOperation),
                 },
               );
               // Results computed under a prior session must not be

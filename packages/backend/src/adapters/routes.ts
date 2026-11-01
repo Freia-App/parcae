@@ -402,6 +402,7 @@ export function registerModelRoutes(
               user: ctx.user ?? null,
               adapter,
               force,
+              isSessionCurrent: req._isSessionCurrent,
             });
 
             json(res, 200, {

@@ -156,11 +156,26 @@ export function slugify(input: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+// Every sslmode that asks for TLS gets verified TLS: an object connection
+// carries no sslmode of its own, so a mode left unmapped would reach pg as
+// no TLS at all and send the password to whoever answers. `prefer` and
+// `allow` (try TLS, fall back) are held to TLS rather than given a fallback.
+const SSL_FOR_MODE: Record<string, boolean | { rejectUnauthorized: false }> = {
+  true: true,
+  allow: true,
+  prefer: true,
+  require: true,
+  "verify-ca": true,
+  "verify-full": true,
+  "no-verify": { rejectUnauthorized: false },
+};
+
 /**
  * Parse a Postgres connection URL into the object shape pg accepts. Passing an
  * object rather than the raw URL reduces the chance the driver echoes the
  * password back in error messages. Unparseable URLs fall through to the
- * original string — pg will attempt its own parse and fail loudly.
+ * original string — pg will attempt its own parse and fail loudly. An
+ * sslmode it does not know throws rather than connecting without TLS.
  */
 export function pgConnectionFromUrl(
   url: string,
@@ -171,6 +186,7 @@ export function pgConnectionFromUrl(
   password?: string;
   database?: string;
   ssl?: boolean | { rejectUnauthorized: boolean };
+  enableChannelBinding?: boolean;
 } {
   let parsed: URL;
   try {
@@ -181,9 +197,20 @@ export function pgConnectionFromUrl(
   const params = parsed.searchParams;
   const sslParam = params.get("ssl") ?? params.get("sslmode");
   let ssl: boolean | { rejectUnauthorized: boolean } | undefined;
-  if (sslParam === "true" || sslParam === "require") ssl = true;
-  else if (sslParam === "no-verify")
-    ssl = { rejectUnauthorized: false };
+  if (sslParam !== null && sslParam !== "disable" && sslParam !== "false") {
+    ssl = Object.hasOwn(SSL_FOR_MODE, sslParam)
+      ? SSL_FOR_MODE[sslParam]
+      : undefined;
+    if (ssl === undefined) {
+      throw new Error(
+        `[parcae] DATABASE_URL has an sslmode the CLI does not know ("${sslParam}"); use disable, require, verify-ca or verify-full.`,
+      );
+    }
+  }
+  // pg uses SCRAM-SHA-256-PLUS when the server offers it, which is as close
+  // to libpq's `require` as the driver goes.
+  const binding = params.get("channel_binding");
+  const enableChannelBinding = binding === "require" || binding === "prefer";
   return {
     host: parsed.hostname,
     port: parsed.port ? Number(parsed.port) : undefined,
@@ -191,6 +218,7 @@ export function pgConnectionFromUrl(
     password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
     database: parsed.pathname.replace(/^\//, "") || undefined,
     ...(ssl !== undefined ? { ssl } : {}),
+    ...(enableChannelBinding ? { enableChannelBinding } : {}),
   };
 }
 
