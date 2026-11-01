@@ -198,7 +198,9 @@ export function pgConnectionFromUrl(
   const sslParam = params.get("ssl") ?? params.get("sslmode");
   let ssl: boolean | { rejectUnauthorized: boolean } | undefined;
   if (sslParam !== null && sslParam !== "disable" && sslParam !== "false") {
-    ssl = SSL_FOR_MODE[sslParam];
+    ssl = Object.hasOwn(SSL_FOR_MODE, sslParam)
+      ? SSL_FOR_MODE[sslParam]
+      : undefined;
     if (ssl === undefined) {
       throw new Error(
         `[parcae] DATABASE_URL has an sslmode the CLI does not know ("${sslParam}"); use disable, require, verify-ca or verify-full.`,

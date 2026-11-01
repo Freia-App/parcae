@@ -402,9 +402,7 @@ export function registerModelRoutes(
               user: ctx.user ?? null,
               adapter,
               force,
-              // A socket call carries its session operation's check; one
-              // without it subscribes nothing.
-              isSessionCurrent: req._isSessionCurrent ?? (() => false),
+              isSessionCurrent: req._isSessionCurrent,
             });
 
             json(res, 200, {

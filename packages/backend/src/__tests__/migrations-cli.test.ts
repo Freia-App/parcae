@@ -693,9 +693,11 @@ describe("pgConnectionFromUrl", () => {
   });
 
   it("refuses an sslmode it does not know rather than dropping TLS", () => {
-    expect(() =>
-      pgConnectionFromUrl("postgres://a:b@h/d?sslmode=verify-everything"),
-    ).toThrow(/sslmode/);
+    for (const mode of ["verify-everything", "constructor"]) {
+      expect(() =>
+        pgConnectionFromUrl(`postgres://a:b@h/d?sslmode=${mode}`),
+      ).toThrow(/sslmode/);
+    }
   });
 
   it("honours channel_binding=require", () => {
