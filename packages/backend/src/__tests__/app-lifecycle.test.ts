@@ -618,6 +618,50 @@ describe("model discovery normalization", () => {
   });
 });
 
+describe("resyncQueries across a session boundary", () => {
+  it("subscribes nothing once a hello has replaced the session that asked", async () => {
+    let current = true;
+    const subscribed: string[] = [];
+    const Thing = {
+      type: "thing",
+      scope: { read: () => (qb: any) => qb },
+    };
+    const query: any = {
+      __modelType: "thing",
+      exec: () => ({ toSQL: () => ({ sql: "select", bindings: [] }) }),
+      find: async () => [],
+      count: async () => 0,
+      clone: () => query,
+    };
+    const adapter = {
+      modelsByType: new Map([["thing", Thing]]),
+      queryFromClient: vi.fn(() => query),
+      batchFindByType: vi.fn(async () => new Map()),
+      executeSubscriptionCount: vi.fn(async () => 0),
+      subscriptions: {
+        subscribe: vi.fn(async ({ socketId }: { socketId: string }) => {
+          subscribed.push(socketId);
+          // The boundary lands while the first entry is subscribing.
+          current = false;
+          return { hash: "h", items: [] };
+        }),
+      },
+    };
+    const entries = Array.from({ length: 4 }, (_, index) => ({
+      key: String(index),
+      modelType: "thing",
+      steps: [],
+    }));
+
+    await resyncQueries("socket", null, entries, adapter as any, {
+      concurrency: 1,
+      isSessionCurrent: () => current,
+    }).catch(() => null);
+
+    expect(subscribed).toEqual(["socket"]);
+  });
+});
+
 describe("resyncQueries limits", () => {
   it("rejects oversized resync batches before doing query work", async () => {
     await expect(
@@ -629,7 +673,7 @@ describe("resyncQueries limits", () => {
           { key: "b", modelType: "thing", steps: [] },
         ],
         {} as any,
-        { maxEntries: 1 },
+        { maxEntries: 1, isSessionCurrent: () => true },
       ),
     ).rejects.toThrow("Resync query limit exceeded (2/1)");
   });
@@ -673,6 +717,7 @@ describe("resyncQueries limits", () => {
 
     const resync = resyncQueries("socket", null, entries, adapter as any, {
       concurrency: 2,
+      isSessionCurrent: () => true,
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(peak).toBe(2);
@@ -706,6 +751,7 @@ describe("resyncQueries limits", () => {
           { key: "denied-key", modelType: "denied", steps: [] },
         ],
         adapter as any,
+        { isSessionCurrent: () => true },
       ),
     ).resolves.toEqual([
       { key: "missing-key", hash: null, items: [], totalCount: 0 },
