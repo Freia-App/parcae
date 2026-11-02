@@ -117,6 +117,8 @@ const PARCAE_OWNED_COLUMNS: ReadonlySet<string> = new Set([
   "_embedding",
 ]);
 
+const ORDER_SPEC_KEYS: ReadonlySet<string> = new Set(["column", "order", "nulls"]);
+
 const SYSTEM_DATA_KEYS = new Set([
   "id",
   "type",
@@ -1389,6 +1391,29 @@ export class BackendAdapter implements ModelAdapter {
             throw new ClientError(
               `Invalid column "${key}" on model "${modelType}"`,
             );
+          }
+        }
+      } else if (step.method === "orderBy" && Array.isArray(firstArg)) {
+        // Knex's spec form, [{ column, order, nulls }]: the one way to sort
+        // NULLS LAST that stays an orderBy step the subscription replays.
+        // Each entry names a plain allowlisted column and nothing else.
+        for (const spec of firstArg) {
+          const keys =
+            spec && typeof spec === "object" && !Array.isArray(spec)
+              ? Object.keys(spec)
+              : null;
+          if (
+            !keys ||
+            keys.some((k) => !ORDER_SPEC_KEYS.has(k)) ||
+            typeof spec.column !== "string" ||
+            !validColumns.has(spec.column) ||
+            policy.own.has(spec.column) ||
+            (spec.order !== undefined &&
+              !["asc", "desc"].includes(String(spec.order).toLowerCase())) ||
+            (spec.nulls !== undefined &&
+              !["first", "last"].includes(String(spec.nulls).toLowerCase()))
+          ) {
+            throw new ClientError(`Invalid column argument to ${step.method}`);
           }
         }
       } else if (!(step.method === "orderBy" && firstArg === false)) {

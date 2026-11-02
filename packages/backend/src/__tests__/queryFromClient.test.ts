@@ -300,6 +300,8 @@ describe("BackendAdapter.queryFromClient", () => {
         ).toThrow(`Invalid column argument to ${method}`);
       });
 
+
+
       it(`rejects a number, boolean or null column in ${method}`, () => {
         for (const column of [1, true, null]) {
           expect(() => run([{ method, args: [column, "x"] }])).toThrow(
@@ -308,6 +310,31 @@ describe("BackendAdapter.queryFromClient", () => {
         }
       });
     }
+
+    it("accepts orderBy's [{ column, order, nulls }] spec on allowlisted columns", () => {
+      expect(() =>
+        run([
+          {
+            method: "orderBy",
+            args: [[{ column: "name", order: "desc", nulls: "last" }]],
+          },
+        ]),
+      ).not.toThrow();
+    });
+
+    it("refuses an orderBy spec naming a private column, an unknown key or a bad order", () => {
+      for (const spec of [
+        { column: "passwordHash", order: "desc" },
+        { column: "name", order: "desc", raw: "x" },
+        { column: "name", order: "desc; drop" },
+        { column: "name", nulls: "middle" },
+        { column: ["name"] },
+      ]) {
+        expect(() => run([{ method: "orderBy", args: [[spec]] }])).toThrow(
+          "Invalid column argument to orderBy",
+        );
+      }
+    });
 
     // Object-where is a Knex shape only for these; elsewhere the object's
     // values are read as columns behind keys that pass the check.
