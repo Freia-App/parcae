@@ -342,6 +342,29 @@ describe('mounted React SDK hooks', () => {
     expect(latest!.items).toEqual([]);
   });
 
+  it('stops loading a skipped query once the session resolves', async () => {
+    const fake = new FakeClient();
+    let latest: any;
+
+    function Capture() {
+      latest = useQuery(null);
+      return null;
+    }
+
+    await act(async () => {
+      renderer = create(
+        <ParcaeProvider client={asClient(fake)}>
+          <Capture />
+        </ParcaeProvider>,
+      );
+    });
+    expect(latest!.loading).toBe(true);
+
+    await act(async () => fake.session.resolve('user-1'));
+
+    expect(latest!.loading).toBe(false);
+  });
+
   it('executes a legacy chain through the Provider client adapter', async () => {
     const source = new FakeClient();
     const provider = new FakeClient();
