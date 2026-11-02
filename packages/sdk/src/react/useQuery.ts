@@ -1311,7 +1311,12 @@ export function useQuery<T>(
   const resultClientRef = useRef<ParcaeClient | null>(null);
   const resultEntryRef = useRef<CacheEntry | undefined>(undefined);
   const entry = key ? caches.get(client)?.get(key) : undefined;
-  const observableHash = `${key ?? ""}|${entry?.hash ?? "L"}`;
+  // A skipped query has no entry, so its only observable is the session: a
+  // hash without it kept the first render's `loading: true` after the
+  // session resolved.
+  const observableHash = key
+    ? `${key}|${entry?.hash ?? "L"}`
+    : `|${sessionReady ? "R" : "P"}`;
 
   if (
     resultRef.current &&
