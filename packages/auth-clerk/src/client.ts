@@ -29,6 +29,7 @@ import type { AuthClientAdapter } from "@parcae/sdk";
 
 type GetTokenFn = (opts?: {
   organizationId?: string;
+  skipCache?: boolean;
 }) => Promise<string | null>;
 
 type TokenChangeCallback = (token: string | null) => void;
@@ -54,24 +55,31 @@ export function createClerkAuthAdapter(
   getToken: GetTokenFn,
   options: ClerkClientAdapterOptions,
 ): AuthClientAdapter {
+  const read = async (skipCache: boolean) =>
+    (await getToken({
+      organizationId: options.organizationId ?? undefined,
+      skipCache,
+    })) ?? null;
+
   const adapter: AuthClientAdapter = {
     init() {
       // No initialization needed — Clerk manages sessions externally.
     },
 
-    async getToken() {
-      const token = await getToken({
-        organizationId: options.organizationId ?? undefined,
-      });
-      return token ?? null;
-    },
+    // Clerk judges whether its cached token is still good against the
+    // device clock, so on a machine whose clock runs slow a renew keeps
+    // getting back the token the server is about to expire, and the socket
+    // drops every minute. A fresh request mints one instead. Only renew
+    // asks: every mint runs Clerk's session listeners, and on a hello that
+    // reaches the Provider before the ack and starts another hello.
+    getToken: (request) => read(request?.fresh === true),
 
     onChange(callback: TokenChangeCallback) {
       let active = true;
       let generation = 0;
       const unsubscribe = options.subscribe(() => {
         const currentGeneration = ++generation;
-        void adapter.getToken().then(
+        void read(false).then(
           (token) => {
             if (active && currentGeneration === generation) callback(token);
           },

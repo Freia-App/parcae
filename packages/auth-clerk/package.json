@@ -41,6 +41,7 @@
   "devDependencies": {
     "@parcae/backend": "workspace:*",
     "@parcae/model": "workspace:*",
+    "@parcae/sdk": "workspace:*",
     "@types/node": "^25.9.3",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3",
