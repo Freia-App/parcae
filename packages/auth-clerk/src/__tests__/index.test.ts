@@ -73,6 +73,34 @@ describe("clerk server adapter", () => {
     });
   });
 
+  it("logs why it refused a token, once a minute per user and reason", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_900_000_090_000);
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    mocks.verifyToken.mockRejectedValue(
+      Object.assign(new Error("JWT is expired"), { reason: "token-expired" }),
+    );
+    const claims = Buffer.from(
+      JSON.stringify({ sub: "user_9", exp: 1_900_000_060 }),
+    ).toString("base64url");
+    const token = `header.${claims}.signature`;
+    const auth = clerk(config);
+    await auth.setup(setupContext());
+
+    await expect(auth.resolveToken(token)).resolves.toBeNull();
+    await expect(auth.resolveToken(token)).resolves.toBeNull();
+    expect(warn.mock.calls).toEqual([
+      [
+        '[parcae/auth-clerk] token refused reason="token-expired" user="user_9" expiredAgoMs=30000',
+      ],
+    ]);
+
+    now.mockReturnValue(1_900_000_150_001);
+    await auth.resolveToken(token);
+    expect(warn).toHaveBeenCalledTimes(2);
+    now.mockRestore();
+    warn.mockRestore();
+  });
+
   it("reads the org role from the v2 JWT claim without calling the Clerk API", async () => {
     mocks.verifyToken.mockResolvedValue({
       sub: "user_1",

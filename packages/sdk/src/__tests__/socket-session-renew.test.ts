@@ -155,7 +155,15 @@ describe("SocketTransport — session renewal", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(emitsOf("hello").map((e) => e.args[0])).toEqual([
       { token: "t1" },
-      { token: "t3" },
+      {
+        token: "t3",
+        diag: {
+          offlineMs: 0,
+          renewAttempts: 1,
+          renewLateMs: 0,
+          renewOutcome: "refused",
+        },
+      },
     ]);
     transport.dispose();
   });
@@ -174,6 +182,123 @@ describe("SocketTransport — session renewal", () => {
     currentSocket.disconnect();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(emitsOf("renew")).toHaveLength(0);
+    transport.dispose();
+  });
+});
+
+describe("SocketTransport — why the last connection lapsed", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function serverCloses() {
+    currentSocket.connected = false;
+    currentSocket._fire("disconnect", "transport close");
+  }
+
+  it("tells the next hello the auth provider kept returning the token the server had", async () => {
+    const transport = await connected(["t1"]);
+    ackLatest("hello", { userId: "u1", expiresInMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(60_000);
+    serverCloses();
+    await vi.advanceTimersByTimeAsync(3_000);
+    currentSocket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(emitsOf("hello").map((e) => e.args[0])).toEqual([
+      { token: "t1" },
+      {
+        token: "t1",
+        diag: {
+          disconnect: "transport close",
+          offlineMs: 3_000,
+          renewAttempts: 8,
+          renewLateMs: 0,
+          renewOutcome: "token-unchanged",
+        },
+      },
+    ]);
+    transport.dispose();
+  });
+
+  it("reports a renew timer that fired late, as in a hidden or throttled tab", async () => {
+    const transport = await connected(["t1", "t2"]);
+    ackLatest("hello", { userId: "u1", expiresInMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(44_000);
+    // The clock moves on while the timer waits, as when the browser
+    // holds a background tab's timers back.
+    vi.setSystemTime(Date.now() + 40_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(emitsOf("renew")).toHaveLength(1);
+    serverCloses();
+    currentSocket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(emitsOf("hello").at(-1)?.args[0]).toEqual({
+      token: "t2",
+      diag: {
+        disconnect: "transport close",
+        offlineMs: 0,
+        renewAttempts: 1,
+        renewLateMs: 40_000,
+      },
+    });
+    transport.dispose();
+  });
+
+  it("reports an auth provider that failed while renewing", async () => {
+    let failing = false;
+    const transport = new SocketTransport({
+      url: "http://localhost:0",
+      getToken: async () => {
+        if (failing) throw new Error("Network request failed while offline");
+        return "t1";
+      },
+    });
+    currentSocket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    ackLatest("hello", { userId: "u1", expiresInMs: 20_000 });
+    failing = true;
+    await vi.advanceTimersByTimeAsync(20_000);
+    failing = false;
+    serverCloses();
+    currentSocket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(emitsOf("hello").at(-1)?.args[0]).toEqual({
+      token: "t1",
+      diag: {
+        disconnect: "transport close",
+        offlineMs: 0,
+        renewAttempts: 8,
+        renewLateMs: 0,
+        renewOutcome: "token-error",
+        renewError: "Network request failed while offline",
+      },
+    });
+    transport.dispose();
+  });
+
+  it("starts the next connection's report afresh once a hello lands", async () => {
+    const transport = await connected(["t1"]);
+    ackLatest("hello", { userId: "u1", expiresInMs: 60_000 });
+    serverCloses();
+    currentSocket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    ackLatest("hello", { userId: "u1", expiresInMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(1_000);
+    serverCloses();
+    currentSocket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(emitsOf("hello").at(-1)?.args[0]).toEqual({
+      token: "t1",
+      diag: {
+        disconnect: "transport close",
+        offlineMs: 0,
+        renewAttempts: 0,
+        renewLateMs: 0,
+      },
+    });
     transport.dispose();
   });
 });

@@ -82,6 +82,26 @@ function defaultMapUser(clerkUser: any): Record<string, any> {
   };
 }
 
+// ─── Refused tokens ──────────────────────────────────────────────────────────
+
+const REFUSAL_LOG_INTERVAL_MS = 60_000;
+const REFUSAL_LOG_LIMIT = 10_000;
+
+/** The `sub` and `exp` of a token that failed verification, read without trusting it. */
+function unverifiedClaims(token: string): { sub?: string; exp?: number } {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"),
+    );
+    return {
+      sub: typeof payload?.sub === "string" ? payload.sub.slice(0, 64) : undefined,
+      exp: typeof payload?.exp === "number" ? payload.exp : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 // ─── clerk() — factory function ──────────────────────────────────────────────
 
 /**
@@ -104,6 +124,29 @@ export function clerk(config: ClerkConfig): AuthAdapter {
   let hasTombstoneTable = false;
   const deletedUsers = new Set<string>();
   const userOperations = new Map<string, Promise<void>>();
+  // A client stuck on a dead token retries for as long as it is open, so each
+  // user and reason is logged at most once a minute.
+  const refusalsLogged = new Map<string, number>();
+  const logRefusal = (token: string, err: unknown) => {
+    const rawReason = (err as { reason?: unknown } | null)?.reason;
+    const reason =
+      typeof rawReason === "string"
+        ? rawReason.slice(0, 60)
+        : err instanceof Error
+          ? err.name
+          : "unknown";
+    const { sub, exp } = unverifiedClaims(token);
+    const key = `${sub}:${reason}`;
+    const now = Date.now();
+    if (now - (refusalsLogged.get(key) ?? 0) < REFUSAL_LOG_INTERVAL_MS) return;
+    if (refusalsLogged.size >= REFUSAL_LOG_LIMIT) refusalsLogged.clear();
+    refusalsLogged.set(key, now);
+    const expired =
+      exp === undefined ? "" : ` expiredAgoMs=${now - exp * 1000}`;
+    log.warn(
+      `[parcae/auth-clerk] token refused reason=${JSON.stringify(reason)} user=${JSON.stringify(sub ?? "unknown")}${expired}`,
+    );
+  };
 
   async function serializeUser<T>(id: string, operation: () => Promise<T>) {
     const previous = userOperations.get(id) ?? Promise.resolve();
@@ -228,7 +271,8 @@ export function clerk(config: ClerkConfig): AuthAdapter {
         secretKey: config.secretKey,
         authorizedParties: config.authorizedParties,
       });
-    } catch {
+    } catch (err) {
+      logRefusal(token, err);
       return null;
     }
 
