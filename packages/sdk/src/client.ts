@@ -10,6 +10,7 @@
 import { Model, FrontendAdapter } from "@parcae/model";
 import type { Transport, RequestOptions } from "@parcae/model";
 import { SocketTransport } from "./transports/socket";
+import type { TokenRequest } from "./auth-adapter";
 import type {
   ResyncEntry,
   ResyncResult,
@@ -23,9 +24,10 @@ export interface ClientConfig {
   version?: string;
   /**
    * Token resolver — called once before the initial hello and once
-   * per reconnect. Return `null` for anonymous sessions.
+   * per reconnect, and with `{ fresh: true }` to renew the socket
+   * session. Return `null` for anonymous sessions.
    */
-  getToken: () => Promise<string | null>;
+  getToken: (options?: TokenRequest) => Promise<string | null>;
   /**
    * socket.io transports list. Defaults to `["websocket"]`. Pass
    * `["polling"]` on runtimes without a WebSocket global (e.g. Lynx

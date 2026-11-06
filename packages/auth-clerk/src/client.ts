@@ -66,22 +66,19 @@ export function createClerkAuthAdapter(
       // No initialization needed — Clerk manages sessions externally.
     },
 
-    // The transport reads here for every hello and renew, and each one
-    // needs a token the server will still accept. Clerk judges whether its
-    // cached token is still good against the device clock, so on a machine
-    // whose clock runs slow it keeps handing back a token the server has
-    // already expired, and the socket drops every minute. Asking Clerk to
-    // mint one takes the device clock out of it.
-    getToken: () => read(true),
+    // Clerk judges whether its cached token is still good against the
+    // device clock, so on a machine whose clock runs slow a renew keeps
+    // getting back the token the server is about to expire, and the socket
+    // drops every minute. A fresh request mints one instead. Only renew
+    // asks: every mint runs Clerk's session listeners, and on a hello that
+    // reaches the Provider before the ack and starts another hello.
+    getToken: (request) => read(request?.fresh === true),
 
     onChange(callback: TokenChangeCallback) {
       let active = true;
       let generation = 0;
       const unsubscribe = options.subscribe(() => {
         const currentGeneration = ++generation;
-        // The cached read is enough here: the Provider only compares
-        // authorization claims, and Clerk fires this on every session
-        // update, so minting would add a request to each.
         void read(false).then(
           (token) => {
             if (active && currentGeneration === generation) callback(token);

@@ -12,12 +12,23 @@
  * state from socket lifecycle events.
  */
 
+export interface TokenRequest {
+  fresh?: boolean;
+}
+
 export interface AuthClientAdapter {
   /** Called once by ParcaeProvider before the transport is built. */
   init(baseUrl: string): void;
 
-  /** Resolve the current bearer token. `null` = anonymous session. */
-  getToken(): Promise<string | null>;
+  /**
+   * Resolve the current bearer token. `null` = anonymous session.
+   *
+   * `fresh` asks for a newly issued token rather than a cached one. The
+   * transport sets it only to renew, where the claims cannot change, so a
+   * provider that announces each new token through `onChange` cannot
+   * restart a handshake that is still waiting for its ack.
+   */
+  getToken(options?: TokenRequest): Promise<string | null>;
 
   /**
    * Subscribe to token changes. Fired on sign-in (non-null token),

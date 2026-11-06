@@ -221,9 +221,9 @@ const OwnedProvider: React.FC<Omit<ParcaeProviderProps, "client">> = ({
   useEffect(() => {
     if (!url) return;
     const getToken: ClientConfig["getToken"] = auth
-      ? async () => {
+      ? async (options) => {
           auth.init(url);
-          return await auth.getToken();
+          return await auth.getToken(options);
         }
       : noopToken;
     const owned = createClient({

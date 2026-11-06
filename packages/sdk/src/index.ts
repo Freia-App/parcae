@@ -1,4 +1,4 @@
-export type { AuthClientAdapter } from "./auth-adapter";
+export type { AuthClientAdapter, TokenRequest } from "./auth-adapter";
 export type { ClientConfig, ParcaeClient } from "./client";
 export { createClient, withIsolatedClient } from "./client";
 export { SessionMachine } from "./session-machine";

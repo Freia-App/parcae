@@ -42,21 +42,23 @@ describe("createClerkAuthAdapter", () => {
       opts?.skipCache ? "minted" : "expired-but-cached",
     );
 
-  it("gives the transport a token Clerk has just minted", async () => {
+  it("mints a token when the transport asks for a fresh one", async () => {
     const getToken = clerkWithStaleCache();
     const adapter = createClerkAuthAdapter(getToken, {
       organizationId: "org_1",
       subscribe: () => () => {},
     });
 
-    await expect(adapter.getToken()).resolves.toBe("minted");
+    await expect(adapter.getToken({ fresh: true })).resolves.toBe("minted");
     expect(getToken).toHaveBeenCalledWith({
       organizationId: "org_1",
       skipCache: true,
     });
   });
 
-  it("answers session changes from Clerk's cache", async () => {
+  // Each mint runs Clerk's session listeners, so a hello that minted would
+  // wake onChange before its own ack and start another hello.
+  it("reads Clerk's cache for a hello and for session changes", async () => {
     let onSessionChange: (() => void) | null = null;
     const getToken = clerkWithStaleCache();
     const adapter = createClerkAuthAdapter(getToken, {
@@ -68,6 +70,7 @@ describe("createClerkAuthAdapter", () => {
     const onChange = vi.fn();
     adapter.onChange!(onChange);
 
+    await expect(adapter.getToken()).resolves.toBe("expired-but-cached");
     onSessionChange!();
     await Promise.resolve();
     await Promise.resolve();

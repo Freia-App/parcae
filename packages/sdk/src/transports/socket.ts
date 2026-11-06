@@ -20,6 +20,7 @@
  */
 
 import SocketIO from "socket.io-client";
+import type { TokenRequest } from "../auth-adapter";
 import pako from "pako";
 import { decompress } from "compress-json";
 import { EventEmitter } from "eventemitter3";
@@ -98,9 +99,10 @@ export interface SocketTransportConfig {
   /**
    * Async token resolver. Called once before the initial connect and
    * once on every reconnect (handing back the latest token from the
-   * auth adapter). Return `null` for anonymous sessions.
+   * auth adapter), and with `{ fresh: true }` to renew. Return `null`
+   * for anonymous sessions.
    */
-  getToken: () => Promise<string | null>;
+  getToken: (options?: TokenRequest) => Promise<string | null>;
   /**
    * socket.io transports list. Defaults to `["websocket"]` — the
    * fast path used by web, Node, and any runtime with a WebSocket
@@ -199,7 +201,7 @@ export class SocketTransport extends EventEmitter implements Transport {
   private socket: any;
   private url: string;
   private version: string;
-  private getToken: () => Promise<string | null>;
+  private getToken: (options?: TokenRequest) => Promise<string | null>;
   private inflight = new Map<string, Promise<any>>();
   private pendingCalls = new Map<string, PendingCall>();
   /**
@@ -722,7 +724,7 @@ export class SocketTransport extends EventEmitter implements Transport {
         this.renewTrace.lateMs,
         Date.now() - dueAt,
       );
-      void this.getToken().then(
+      void this.getToken({ fresh: true }).then(
         (token) => {
           if (!current()) return;
           if (token === null) {
