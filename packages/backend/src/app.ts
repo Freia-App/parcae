@@ -19,6 +19,11 @@ import {
 } from "./socket-fake-res";
 import { SocketSessionReconciler } from "./socket-session-reconciler";
 import {
+  clientDiagnostics,
+  logFields,
+  withinLogBudget,
+} from "./socket-diagnostics";
+import {
   ackOf,
   isReplyableRequestId,
   listenSafely,
@@ -468,10 +473,30 @@ export function createSocketSessionController(
   authAdapter: AuthAdapter | null,
   subscriptions: SocketSessionSubscriptions,
   build?: string,
-  onExpired?: () => void,
+  onExpired?: (detail: string) => void,
 ) {
   const reconciler = new SocketSessionReconciler<AuthSession>();
   let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+  // This session's renewal history, for the line logged when it lapses.
+  let helloAt = 0;
+  let renews = 0;
+  let lastRenewAt = 0;
+  let lastRenewRefusal: string | undefined;
+  const lapse = () => {
+    const now = Date.now();
+    const expiresAt = reconciler.session?.expiresAt;
+    return logFields({
+      user: reconciler.session?.user?.id,
+      expiredAgoMs:
+        typeof expiresAt === "number" && Number.isFinite(expiresAt)
+          ? now - expiresAt
+          : undefined,
+      sessionAgeMs: helloAt ? now - helloAt : undefined,
+      renews,
+      lastRenewAgoMs: lastRenewAt ? now - lastRenewAt : undefined,
+      lastRenewRefusal,
+    });
+  };
 
   // A non-finite expiry from a misbehaving adapter reads as expired.
   const isExpired = (): boolean => {
@@ -493,7 +518,7 @@ export function createSocketSessionController(
     expiryTimer = setTimeout(
       () => {
         expiryTimer = null;
-        if (isExpired()) onExpired?.();
+        if (isExpired()) onExpired?.(lapse());
         else armExpiry();
       },
       Math.min(Math.max(delay, 0), MAX_TIMER_MS),
@@ -528,7 +553,7 @@ export function createSocketSessionController(
     expireIfDue(): boolean {
       if (!isExpired()) return false;
       clearExpiry();
-      onExpired?.();
+      onExpired?.(lapse());
       return true;
     },
     async hello(
@@ -558,9 +583,35 @@ export function createSocketSessionController(
         }
         return null;
       });
-      if (result.applied) armExpiry();
       const session = result.applied ? result.session : reconciler.session;
       const userId = session?.user?.id ?? null;
+      if (result.applied) {
+        helloAt = Date.now();
+        renews = 0;
+        lastRenewAt = 0;
+        lastRenewRefusal = undefined;
+        armExpiry();
+        const presented = typeof token === "string" && token !== "";
+        const diag = clientDiagnostics(
+          (payload as { diag?: unknown } | null)?.diag,
+        );
+        if (presented && authAdapter && !session) {
+          if (withinLogBudget()) {
+            log.warn(
+              `[socket] hello refused its token ${logFields({ ...diag })}`.trimEnd(),
+            );
+          }
+        } else if (diag && withinLogBudget()) {
+          log.info(
+            `[socket] reconnected ${logFields({
+              user: userId,
+              token: presented ? undefined : "none",
+              ...expiryOf(session),
+              ...diag,
+            })}`,
+          );
+        }
+      }
       callback?.({
         userId,
         ...(build === undefined ? {} : { build }),
@@ -595,13 +646,23 @@ export function createSocketSessionController(
       } catch {
         next = null;
       }
-      if (
-        !next ||
-        !sameAuthorization(snapshot.session, next) ||
-        !reconciler.replace(snapshot, next)
-      ) {
+      const user = snapshot.session.user?.id;
+      const refuse = (reason: string) => {
+        // A hello that landed meanwhile owns the socket now; the refusal
+        // belongs to the session it replaced.
+        if (reconciler.isOperationCurrent(snapshot.operation)) {
+          lastRenewRefusal = reason;
+        }
+        if (withinLogBudget()) {
+          log.info(`[socket] renew refused ${logFields({ user, reason })}`);
+        }
         return refused;
-      }
+      };
+      if (!next) return refuse("unresolved");
+      if (!sameAuthorization(snapshot.session, next)) return refuse("changed");
+      if (!reconciler.replace(snapshot, next)) return refuse("superseded");
+      renews++;
+      lastRenewAt = Date.now();
       armExpiry();
       return { success: true, userId: next.user.id, ...expiryOf(next) };
     },
@@ -1443,8 +1504,8 @@ export function createApp(config: AppConfig): ParcaeApp {
           // disconnect: every client version reconnects after a transport
           // close and says hello with a fresh token, while a server
           // disconnect leaves socket.io-client offline for good.
-          () => {
-            log.info("[socket] session expired, closing the connection");
+          (detail) => {
+            log.info(`[socket] session expired, closing the connection ${detail}`);
             socket.conn.close();
           },
         );

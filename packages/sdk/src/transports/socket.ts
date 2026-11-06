@@ -55,6 +55,29 @@ const RESEND_GRACE_MS = 15_000;
 const RENEW_EARLY_MS = 15_000;
 const RENEW_RETRY_MS = 2_000;
 
+/**
+ * Why the last connection ended, sent with the next hello. Only the client
+ * can see a renew timer that fired late (a hidden or throttled tab) or an
+ * auth provider that failed or kept returning the old token; the server
+ * sees just a session that lapsed.
+ */
+interface ReconnectDiagnostics {
+  disconnect?: string;
+  offlineMs: number;
+  hiddenAtDisconnect?: boolean;
+  renewAttempts: number;
+  renewLateMs: number;
+  renewOutcome?: RenewOutcome;
+  renewError?: string;
+}
+
+type RenewOutcome =
+  | "token-null"
+  | "token-unchanged"
+  | "token-error"
+  | "no-answer"
+  | "refused";
+
 const uid = new ShortId({ length: 10 });
 
 interface PendingCall {
@@ -234,6 +257,20 @@ export class SocketTransport extends EventEmitter implements Transport {
   private lastHelloAttemptAt: number | null = null;
   private lastHelloAckAt: number | null = null;
   private renewTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The renewal cycle in progress; reset each time a renew lands. */
+  private renewTrace: {
+    attempts: number;
+    lateMs: number;
+    outcome?: RenewOutcome;
+    error?: string;
+  } = { attempts: 0, lateMs: 0 };
+  /** The first drop since the last resolved hello, and when it happened. */
+  private lostConnection: {
+    at: number;
+    disconnect?: string;
+    hiddenAtDisconnect?: boolean;
+    trace: SocketTransport["renewTrace"];
+  } | null = null;
   private subscriptions = new Map<
     string,
     Map<(...args: any[]) => void, (...args: any[]) => void>
@@ -581,7 +618,9 @@ export class SocketTransport extends EventEmitter implements Transport {
         }
 
         const t0 = performance.now();
-        this.socket.emit("hello", { token }, (response: any) => {
+        const diag = this._reconnectDiagnostics();
+        const payload = diag ? { token, diag } : { token };
+        this.socket.emit("hello", payload, (response: any) => {
           const current = this.activeHandshake;
           if (!current || current.generation !== generation) return;
           if (!response || response.success === false) {
@@ -610,6 +649,8 @@ export class SocketTransport extends EventEmitter implements Transport {
             typeof response.build === "string" ? response.build : null,
           );
           this.confirmedHelloToken = token;
+          this.lostConnection = null;
+          this.renewTrace = { attempts: 0, lateMs: 0 };
           this._scheduleRenew(generation, response.expiresInMs);
           this.sessionReadyForEvents = true;
           this._resendSuspendedCalls();
@@ -652,28 +693,51 @@ export class SocketTransport extends EventEmitter implements Transport {
       return;
     }
     const deadline = Date.now() + expiresInMs;
+    let dueAt = 0;
     const current = () =>
       generation === this.sessionGeneration &&
       !this.isDisposed &&
       this.socket.connected;
+    const arm = (delay: number) => {
+      dueAt = Date.now() + delay;
+      this.renewTimer = setTimeout(attempt, delay);
+    };
+    // A token or ack that settles after the socket moved on belongs to a
+    // cycle that has already been reported or reset.
+    const note = (outcome: RenewOutcome, error?: string) => {
+      if (!current()) return;
+      this.renewTrace.outcome = outcome;
+      this.renewTrace.error = error;
+    };
     const retry = () => {
       if (current() && Date.now() + RENEW_RETRY_MS < deadline) {
-        this.renewTimer = setTimeout(attempt, RENEW_RETRY_MS);
+        arm(RENEW_RETRY_MS);
       }
     };
     const attempt = () => {
       this.renewTimer = null;
       if (!current()) return;
+      this.renewTrace.attempts++;
+      this.renewTrace.lateMs = Math.max(
+        this.renewTrace.lateMs,
+        Date.now() - dueAt,
+      );
       void this.getToken().then(
         (token) => {
-          if (!current() || token === null) return;
+          if (!current()) return;
+          if (token === null) {
+            note("token-null");
+            return;
+          }
           if (token === this.confirmedHelloToken) {
+            note("token-unchanged");
             retry();
             return;
           }
           let answered = false;
           const timer = setTimeout(() => {
             answered = true;
+            note("no-answer");
             retry();
           }, this.handshakeTimeout);
           this.socket.emit("renew", { token }, (response: any) => {
@@ -683,20 +747,42 @@ export class SocketTransport extends EventEmitter implements Transport {
             if (!current()) return;
             if (response?.success === true) {
               this.confirmedHelloToken = token;
+              this.renewTrace = { attempts: 0, lateMs: 0 };
               this._scheduleRenew(generation, response.expiresInMs);
               return;
             }
             log.debug("renew refused, saying hello again");
+            note("refused");
             void this.refreshSession().catch(() => {});
           });
         },
-        () => retry(),
+        (err) => {
+          note(
+            "token-error",
+            (err instanceof Error ? err.message : String(err)).slice(0, 120),
+          );
+          retry();
+        },
       );
     };
-    this.renewTimer = setTimeout(
-      attempt,
-      Math.max(expiresInMs - RENEW_EARLY_MS, 0),
-    );
+    arm(Math.max(expiresInMs - RENEW_EARLY_MS, 0));
+  }
+
+  private _reconnectDiagnostics(): ReconnectDiagnostics | undefined {
+    const lost = this.lostConnection;
+    const trace = lost?.trace ?? this.renewTrace;
+    if (!lost && !trace.outcome) return undefined;
+    return {
+      ...(lost?.disconnect ? { disconnect: lost.disconnect } : {}),
+      offlineMs: lost ? Date.now() - lost.at : 0,
+      ...(lost?.hiddenAtDisconnect === undefined
+        ? {}
+        : { hiddenAtDisconnect: lost.hiddenAtDisconnect }),
+      renewAttempts: trace.attempts,
+      renewLateMs: trace.lateMs,
+      ...(trace.outcome ? { renewOutcome: trace.outcome } : {}),
+      ...(trace.error ? { renewError: trace.error } : {}),
+    };
   }
 
   private _clearRenew(): void {
@@ -720,6 +806,15 @@ export class SocketTransport extends EventEmitter implements Transport {
 
   private _handleSocketDisconnect(reason?: string): void {
     if (this.connection.state.status === "disconnected") return;
+    this.lostConnection ??= {
+      at: Date.now(),
+      disconnect: reason,
+      hiddenAtDisconnect:
+        typeof document === "undefined"
+          ? undefined
+          : document.visibilityState === "hidden",
+      trace: { ...this.renewTrace },
+    };
     const error = new Error(
       reason ? `Disconnected: ${reason}` : "Disconnected",
     );
