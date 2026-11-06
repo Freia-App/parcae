@@ -19,6 +19,21 @@ const RENEW_OUTCOMES = new Set([
 
 const MAX_MS = 86_400_000;
 
+// Every connection can write these lines, so a flood of connections or
+// tokens could fill the log; past this many a minute they are dropped.
+const LINES_PER_MINUTE = 300;
+let budgetWindowStart = 0;
+let budgetLines = 0;
+
+export function withinLogBudget(): boolean {
+  const now = Date.now();
+  if (now - budgetWindowStart >= 60_000) {
+    budgetWindowStart = now;
+    budgetLines = 0;
+  }
+  return ++budgetLines <= LINES_PER_MINUTE;
+}
+
 export function clientDiagnostics(raw: unknown): Record<string, Field> | null {
   if (!raw || typeof raw !== "object") return null;
   const report = raw as Record<string, unknown>;

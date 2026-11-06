@@ -301,4 +301,34 @@ describe("SocketTransport — why the last connection lapsed", () => {
     });
     transport.dispose();
   });
+
+  it("keeps a renew left unanswered by the old connection out of the new one's report", async () => {
+    let index = 0;
+    const tokens = ["t1", "t2", "t3"];
+    const transport = new SocketTransport({
+      url: "http://localhost:0",
+      handshakeTimeout: 5_000,
+      getToken: async () => tokens[Math.min(index++, tokens.length - 1)]!,
+    });
+    currentSocket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    ackLatest("hello", { userId: "u1", expiresInMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(emitsOf("renew")).toHaveLength(1);
+    serverCloses();
+    currentSocket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    ackLatest("hello", { userId: "u1", expiresInMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    serverCloses();
+    currentSocket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(emitsOf("hello").at(-1)?.args[0].diag).toEqual({
+      disconnect: "transport close",
+      offlineMs: 0,
+      renewAttempts: 0,
+      renewLateMs: 0,
+    });
+    transport.dispose();
+  });
 });

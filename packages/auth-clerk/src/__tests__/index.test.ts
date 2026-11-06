@@ -101,6 +101,30 @@ describe("clerk server adapter", () => {
     warn.mockRestore();
   });
 
+  it("caps a minute's refusal lines however many user ids the tokens claim", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_900_000_000_000);
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    mocks.verifyToken.mockRejectedValue(
+      Object.assign(new Error("bad signature"), {
+        reason: "token-invalid-signature",
+      }),
+    );
+    const auth = clerk(config);
+    await auth.setup(setupContext());
+    for (let i = 0; i < 60; i++) {
+      const claims = Buffer.from(
+        JSON.stringify({ sub: `user_${i}`, exp: 1_900_000_060 }),
+      ).toString("base64url");
+      await auth.resolveToken(`header.${claims}.signature`);
+    }
+    expect(warn).toHaveBeenCalledTimes(50);
+    expect(warn.mock.calls[0]).toEqual([
+      '[parcae/auth-clerk] token refused reason="token-invalid-signature" user="user_0"',
+    ]);
+    now.mockRestore();
+    warn.mockRestore();
+  });
+
   it("reads the org role from the v2 JWT claim without calling the Clerk API", async () => {
     mocks.verifyToken.mockResolvedValue({
       sub: "user_1",

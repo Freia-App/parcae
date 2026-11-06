@@ -18,7 +18,11 @@ import {
   createSocketRequestEvents,
 } from "./socket-fake-res";
 import { SocketSessionReconciler } from "./socket-session-reconciler";
-import { clientDiagnostics, logFields } from "./socket-diagnostics";
+import {
+  clientDiagnostics,
+  logFields,
+  withinLogBudget,
+} from "./socket-diagnostics";
 import {
   ackOf,
   isReplyableRequestId,
@@ -591,11 +595,13 @@ export function createSocketSessionController(
         const diag = clientDiagnostics(
           (payload as { diag?: unknown } | null)?.diag,
         );
-        if (presented && !session) {
-          log.warn(
-            `[socket] hello refused its token ${logFields({ ...diag })}`.trimEnd(),
-          );
-        } else if (diag) {
+        if (presented && authAdapter && !session) {
+          if (withinLogBudget()) {
+            log.warn(
+              `[socket] hello refused its token ${logFields({ ...diag })}`.trimEnd(),
+            );
+          }
+        } else if (diag && withinLogBudget()) {
           log.info(
             `[socket] reconnected ${logFields({
               user: userId,
@@ -640,23 +646,21 @@ export function createSocketSessionController(
       } catch {
         next = null;
       }
-      const refusal = !next
-        ? "unresolved"
-        : !sameAuthorization(snapshot.session, next)
-          ? "changed"
-          : !reconciler.replace(snapshot, next)
-            ? "superseded"
-            : null;
-      if (!next || refusal) {
-        lastRenewRefusal = refusal ?? undefined;
-        log.info(
-          `[socket] renew refused ${logFields({
-            user: snapshot.session.user?.id,
-            reason: refusal,
-          })}`,
-        );
+      const user = snapshot.session.user?.id;
+      const refuse = (reason: string) => {
+        // A hello that landed meanwhile owns the socket now; the refusal
+        // belongs to the session it replaced.
+        if (reconciler.isOperationCurrent(snapshot.operation)) {
+          lastRenewRefusal = reason;
+        }
+        if (withinLogBudget()) {
+          log.info(`[socket] renew refused ${logFields({ user, reason })}`);
+        }
         return refused;
-      }
+      };
+      if (!next) return refuse("unresolved");
+      if (!sameAuthorization(snapshot.session, next)) return refuse("changed");
+      if (!reconciler.replace(snapshot, next)) return refuse("superseded");
       renews++;
       lastRenewAt = Date.now();
       armExpiry();

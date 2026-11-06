@@ -702,7 +702,10 @@ export class SocketTransport extends EventEmitter implements Transport {
       dueAt = Date.now() + delay;
       this.renewTimer = setTimeout(attempt, delay);
     };
+    // A token or ack that settles after the socket moved on belongs to a
+    // cycle that has already been reported or reset.
     const note = (outcome: RenewOutcome, error?: string) => {
+      if (!current()) return;
       this.renewTrace.outcome = outcome;
       this.renewTrace.error = error;
     };

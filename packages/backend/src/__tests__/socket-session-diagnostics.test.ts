@@ -7,7 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSocketSessionController } from "../app";
 import type { AuthAdapter, AuthSession } from "../auth";
 import { log } from "../logger";
-import { clientDiagnostics, logFields } from "../socket-diagnostics";
+import {
+  clientDiagnostics,
+  logFields,
+  withinLogBudget,
+} from "../socket-diagnostics";
 
 const subscriptions = { unsubscribeAll: () => {} };
 const NOW = 1_900_000_000_000;
@@ -165,5 +169,61 @@ describe("socket session log lines", () => {
         'user="u1" expiredAgoMs=0 sessionAgeMs=105000 renews=1 lastRenewAgoMs=60000 lastRenewRefusal="changed"',
       ],
     ]);
+  });
+
+  it("does not call a token refused when the app checks no tokens", async () => {
+    const controller = createSocketSessionController("s1", null, subscriptions);
+    await controller.hello({ token: "t1" });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("leaves a renew refusal off the session a newer hello replaced it with", async () => {
+    let finishRenew!: (session: AuthSession) => void;
+    const onExpired = vi.fn();
+    const sessions: Record<string, () => AuthSession | Promise<AuthSession>> = {
+      t1: session("org:admin", 60_000),
+      t2: () =>
+        new Promise<AuthSession>((resolve) => {
+          finishRenew = resolve;
+        }),
+      t3: session("org:admin", 60_000),
+    };
+    const controller = createSocketSessionController(
+      "s1",
+      {
+        resolveToken: async (token: string) => sessions[token]?.() ?? null,
+      } as unknown as AuthAdapter,
+      subscriptions,
+      undefined,
+      onExpired,
+    );
+    await controller.hello({ token: "t1" });
+    const renewing = controller.renew({ token: "t2" });
+    await controller.hello({ token: "t3" });
+    finishRenew(session("org:admin", 60_000)());
+    await expect(renewing).resolves.toMatchObject({ success: false });
+    expect(info.mock.calls).toEqual([
+      ['[socket] renew refused user="u1" reason="superseded"'],
+    ]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onExpired.mock.calls).toEqual([
+      ['user="u1" expiredAgoMs=0 sessionAgeMs=60000 renews=0'],
+    ]);
+  });
+});
+
+describe("socket diagnostic log budget", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("drops lines past the minute's budget and starts again the next minute", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW + 3_600_000);
+    const allowed = Array.from({ length: 301 }, () => withinLogBudget());
+    expect(allowed.filter(Boolean)).toHaveLength(300);
+    expect(allowed.at(-1)).toBe(false);
+    vi.setSystemTime(NOW + 3_660_000);
+    expect(withinLogBudget()).toBe(true);
   });
 });
