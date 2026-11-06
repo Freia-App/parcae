@@ -130,6 +130,11 @@ clerk({
 The client requires a real Clerk session subscription. Token read failures are
 propagated by `getToken()` and are not converted into sign-out events.
 
+`getToken()` asks Clerk to mint a token (`skipCache: true`) for every hello
+and renew: Clerk's cache judges expiry on the device clock, so a slow clock
+gets a token the server has already expired. Session-change reads use the
+cache.
+
 ```typescript
 const auth = createClerkAuthAdapter(getToken, {
   organizationId,
