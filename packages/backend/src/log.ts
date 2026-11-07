@@ -82,6 +82,7 @@ export interface Line {
 const FRAME_KEY = Symbol.for("freia.log.ctx");
 const CAPTURE_KEY = Symbol.for("freia.log.capture");
 const STATE_KEY = Symbol.for("freia.log.state");
+const OUTCOMES_KEY = Symbol.for("freia.log.jobOutcomes");
 
 interface CaptureSink {
   lines: Line[];
@@ -96,6 +97,7 @@ const shared = globalThis as typeof globalThis & {
   [FRAME_KEY]?: AsyncLocalStorage<Frame>;
   [CAPTURE_KEY]?: AsyncLocalStorage<CaptureSink>;
   [STATE_KEY]?: SharedState;
+  [OUTCOMES_KEY]?: Map<string, JobOutcome>;
 };
 const frames = (shared[FRAME_KEY] ??= new AsyncLocalStorage<Frame>());
 const captureScope = (shared[CAPTURE_KEY] ??=
@@ -119,6 +121,35 @@ export function currentFrame(): Readonly<Frame> | undefined {
 export const currentLogContext: () =>
   | Readonly<Partial<LogContext>>
   | undefined = currentFrame;
+
+export type JobOutcome = "succeeded" | "partial" | "skipped" | "failed";
+
+// Keyed by the run's operation id: a frame nested inside the run is a new
+// object with the same id. job() opens each run's entry and takes it back.
+const jobOutcomes = (shared[OUTCOMES_KEY] ??= new Map<string, JobOutcome>());
+
+/**
+ * The outcome the running job's `job finished` line reports, for a run that
+ * returns normally having done only part of its work, or none. A run that
+ * returns without calling this succeeded; one that throws failed. It lives
+ * in the log entry so a test that mocks `@parcae/backend` whole can call it.
+ */
+export function markJobOutcome(outcome: JobOutcome): void {
+  const operationId = currentFrame()?.operationId;
+  if (operationId && jobOutcomes.has(operationId)) {
+    jobOutcomes.set(operationId, outcome);
+  }
+}
+
+/** @internal job() opens a run's outcome and takes it back as the run ends. */
+export function openJobOutcome(operationId: string): () => JobOutcome {
+  jobOutcomes.set(operationId, "succeeded");
+  return () => {
+    const outcome = jobOutcomes.get(operationId) ?? "succeeded";
+    jobOutcomes.delete(operationId);
+    return outcome;
+  };
+}
 
 /** @internal Run `fn` in a frame built from the current one plus `patch`. */
 export function runInFrame<T>(patch: Frame, fn: () => T): T {

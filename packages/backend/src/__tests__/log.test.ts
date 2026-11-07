@@ -14,12 +14,13 @@ import {
   captureLogs,
   type Line,
   log,
+  markJobOutcome,
   runWithFrame,
   socketFrameOf,
   withLogContext,
 } from "../log";
 import { observeOutboundCalls, providerOf, templatePath } from "../outbound";
-import { job, markJobOutcome } from "../routing/job";
+import { job } from "../routing/job";
 import { createServer_, listenServer, type ServerContext } from "../server";
 import { _clearServices, _setServices, enqueue } from "../services/context";
 import { shutdownResources } from "../shutdown";

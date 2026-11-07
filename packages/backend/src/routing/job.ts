@@ -24,11 +24,11 @@
 import { parseClientIdentity } from "../client-identity";
 import {
   BLANK_CONTEXT,
-  currentLogContext,
   isLogId,
   type LogTrigger,
   log,
   newOperationId,
+  openJobOutcome,
   runInFrame,
 } from "../log";
 import { jobLogContext } from "../services/context";
@@ -137,49 +137,34 @@ function jobFrame(name: string, raw: unknown) {
 
 // ─── Job lines ───────────────────────────────────────────────────────────────
 
-export type JobOutcome = "succeeded" | "partial" | "skipped" | "failed";
-
-// Keyed by the run's operation id: a frame nested inside the run is a new
-// object with the same id. Each run deletes its own entry.
-const outcomes = new Map<string, JobOutcome>();
-
 /**
- * The outcome the running job's `job finished` line reports, for a run that
- * returns normally having done only part of its work, or none. A run that
- * returns without calling this succeeded; one that throws failed.
+ * `job started` and `job finished` around one run, inside its frame. The
+ * outcome is `succeeded` unless the handler marks another (markJobOutcome)
+ * or throws.
  */
-export function markJobOutcome(outcome: JobOutcome): void {
-  const operationId = currentLogContext()?.operationId;
-  if (operationId && outcomes.has(operationId)) {
-    outcomes.set(operationId, outcome);
-  }
-}
-
-/** `job started` and `job finished` around one run, inside its frame. */
 async function runLogged(
   operationId: string,
   handler: JobHandler,
   ctx: JobContext,
 ): Promise<any> {
-  outcomes.set(operationId, "succeeded");
+  const outcome = openJobOutcome(operationId);
   const started = performance.now();
   log.info("job started", { attempt: ctx?.attempt ?? null });
   try {
     const result = await handler(ctx);
     log.info("job finished", {
-      outcome: outcomes.get(operationId) ?? "succeeded",
+      outcome: outcome(),
       durationMs: Math.round(performance.now() - started),
     });
     return result;
   } catch (error) {
+    outcome();
     log.error("job finished", {
       outcome: "failed",
       durationMs: Math.round(performance.now() - started),
       error,
     });
     throw error;
-  } finally {
-    outcomes.delete(operationId);
   }
 }
 

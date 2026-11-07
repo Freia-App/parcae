@@ -113,19 +113,12 @@ export type {
   HookEntry,
 } from "./routing/hook";
 
-export {
-  job,
-  getJobs,
-  getJob,
-  clearJobs,
-  markJobOutcome,
-} from "./routing/job";
+export { job, getJobs, getJob, clearJobs } from "./routing/job";
 export type {
   JobHandler,
   JobContext,
   JobOptions,
   JobEntry,
-  JobOutcome,
 } from "./routing/job";
 
 export { cron, getCrons, getCron, clearCrons } from "./routing/cron";
@@ -211,8 +204,18 @@ export {
   currentLogContext,
   captureLogs,
   logHealth,
+  markJobOutcome,
 } from "./log";
-export type { Field, Fields, LogFields, LogContext, LogApp, LogTrigger, Line } from "./log";
+export type {
+  Field,
+  Fields,
+  JobOutcome,
+  LogFields,
+  LogContext,
+  LogApp,
+  LogTrigger,
+  Line,
+} from "./log";
 export { clientIp } from "./client-identity";
 export { unverifiedTokenClaims } from "./socket-diagnostics";
 
