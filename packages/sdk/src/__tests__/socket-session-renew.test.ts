@@ -342,6 +342,24 @@ describe("SocketTransport — client identity", () => {
     vi.useRealTimers();
   });
 
+  it("names the client in each renew too, read at the time", async () => {
+    let app = "dashboard";
+    const tokens = ["t1", "t2"];
+    new SocketTransport({
+      url: "http://localhost:0",
+      getToken: async () => tokens.shift() ?? "t2",
+      clientIdentity: () => `${app}/2026.11.07/web`,
+    });
+    currentSocket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    ackLatest("hello", { userId: "u1", expiresInMs: 60_000 });
+    app = "portal";
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(emitsOf("renew").map((e) => e.args[0])).toEqual([
+      { token: "t2", client: "portal/2026.11.07/web" },
+    ]);
+  });
+
   it("names the client in the hello, so the server's log can say which app dropped", async () => {
     new SocketTransport({
       url: "http://localhost:0",

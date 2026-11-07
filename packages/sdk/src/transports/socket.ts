@@ -766,7 +766,9 @@ export class SocketTransport extends EventEmitter implements Transport {
             note("no-answer");
             retry();
           }, this.handshakeTimeout);
-          this.socket.emit("renew", { token }, (response: any) => {
+          // The client rides each renew too, so a page that moved (the
+          // portal after a sign-in) names itself within a token's life.
+          this.socket.emit("renew", { token, ...this._client() }, (response: any) => {
             if (answered) return;
             answered = true;
             clearTimeout(timer);
