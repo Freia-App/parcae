@@ -12,7 +12,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import { log } from "../logger";
+import { log } from "../log";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -135,9 +135,9 @@ async function runAfterCommit(
     try {
       await callback();
     } catch (err) {
-      log.warn(
-        `transactionContext: after-commit callback threw: ${String(err)}`,
-      );
+      log.warn("transactionContext: after-commit callback threw", {
+        error: err,
+      });
     }
   }
 }
@@ -149,9 +149,7 @@ async function runAfterRollback(
     try {
       await callbacks[i]!();
     } catch (err) {
-      log.warn(
-        `transactionContext: rollback callback threw: ${String(err)}`,
-      );
+      log.warn("transactionContext: rollback callback threw", { error: err });
     }
   }
 }

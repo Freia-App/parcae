@@ -116,7 +116,7 @@
 
 import type { Knex } from "knex";
 import type { ModelConstructor } from "@parcae/model";
-import type { log as logger } from "../logger";
+import type { log as logger } from "../log";
 import type { Engine as DbEngine } from "../adapters/engine";
 
 // ─── Types ───────────────────────────────────────────────────────────────────

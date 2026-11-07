@@ -18,7 +18,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PubSub } from "../services/pubsub";
-import { log } from "../logger";
+import { log } from "../log";
 import { _clearServices, lock } from "../services/context";
 
 describe("PubSub.lock — in-process fallback", () => {
@@ -134,10 +134,10 @@ describe("PubSub failures", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(publish).toHaveBeenCalledTimes(1);
-    expect(logged).toHaveBeenCalledWith(
-      'PubSub publish failed for "change":',
-      failure,
-    );
+    expect(logged).toHaveBeenCalledWith("PubSub publish failed", {
+      event: "change",
+      error: failure,
+    });
     logged.mockRestore();
   });
 

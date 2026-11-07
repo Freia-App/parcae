@@ -1,5 +1,5 @@
 import { dateSafeClone } from "@parcae/model";
-import { log } from "../logger";
+import { log } from "../log";
 /**
  * QuerySubscriptionManager — server-side realtime query subscriptions.
  *
@@ -559,7 +559,8 @@ export class QuerySubscriptionManager {
       (socketHashes?.size ?? 0) >= this.maxSubscriptionsPerSocket
     ) {
       log.warn(
-        `subscriptions: socket ${socketId} hit the ${this.maxSubscriptionsPerSocket} subscription cap — refusing new query for ${modelType}`,
+        "subscriptions: socket hit the subscription cap, refusing new query",
+        { socket: socketId, cap: this.maxSubscriptionsPerSocket, model: modelType },
       );
       return { hash, items: [] };
     }
@@ -1014,19 +1015,22 @@ export class QuerySubscriptionManager {
       } catch (err) {
         if (!full) {
           log.warn(
-            `subscriptions: targeted refresh failed for ${cached.hash}; falling back to full re-eval`,
-            err,
+            "subscriptions: targeted refresh failed; falling back to full re-eval",
+            { hash: cached.hash, error: err },
           );
           try {
             await this._reeval(cached);
           } catch (fallbackError) {
-            log.error(
-              `subscriptions: fallback re-eval failed for ${cached.hash}:`,
-              fallbackError,
-            );
+            log.error("subscriptions: fallback re-eval failed", {
+              hash: cached.hash,
+              error: fallbackError,
+            });
           }
         } else {
-          log.error(`subscriptions: re-eval failed for ${cached.hash}:`, err);
+          log.error("subscriptions: re-eval failed", {
+            hash: cached.hash,
+            error: err,
+          });
         }
       } finally {
         this.reevalSemaphore.release();

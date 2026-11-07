@@ -14,6 +14,7 @@ import type { TokenRequest } from "./auth-adapter";
 import type {
   ResyncEntry,
   ResyncResult,
+  SocketTransportConfig,
   TransportDiagnostics,
 } from "./transports/socket";
 import type { SessionMachine } from "./session-machine";
@@ -40,6 +41,8 @@ export interface ClientConfig {
    * Pass a stable reference when this config is created during render.
    */
   extraHeaders?: Record<string, string>;
+  /** The hello's `client`; see `SocketTransportConfig.clientIdentity`. */
+  clientIdentity?: SocketTransportConfig["clientIdentity"];
   /**
    * Dial the socket at construction (default `true`). Pass `false`
    * for a connection-less client — e.g. one created at module scope
@@ -101,6 +104,7 @@ export function createClient(config: ClientConfig): ParcaeClient {
     getToken: config.getToken,
     transports: config.transports,
     extraHeaders: config.extraHeaders,
+    clientIdentity: config.clientIdentity,
     autoConnect: config.autoConnect,
     watchdogStaleMs: config.watchdogStaleMs,
   });

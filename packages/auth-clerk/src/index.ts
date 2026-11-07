@@ -29,6 +29,7 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import {
   log,
+  unverifiedTokenClaims,
   type AuthAdapter,
   type AuthSession,
   type AuthSetupContext,
@@ -89,21 +90,6 @@ function defaultMapUser(clerkUser: any): Record<string, any> {
 const REFUSAL_LOG_WINDOW_MS = 60_000;
 const REFUSAL_LOG_LIMIT = 50;
 
-/** The `sub` and `exp` of a token that failed verification, read without trusting it. */
-function unverifiedClaims(token: string): { sub?: string; exp?: number } {
-  try {
-    const payload = JSON.parse(
-      Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"),
-    );
-    return {
-      sub: typeof payload?.sub === "string" ? payload.sub.slice(0, 64) : undefined,
-      exp: typeof payload?.exp === "number" ? payload.exp : undefined,
-    };
-  } catch {
-    return {};
-  }
-}
-
 // ─── clerk() — factory function ──────────────────────────────────────────────
 
 /**
@@ -130,15 +116,20 @@ export function clerk(config: ClerkConfig): AuthAdapter {
   // user and reason is logged once a minute.
   let refusalWindowStart = 0;
   const refusalsLogged = new Set<string>();
-  const logRefusal = (token: string, err: unknown) => {
-    const rawReason = (err as { reason?: unknown } | null)?.reason;
+  // Inside a socket hello or the HTTP auth step, the line also carries the
+  // frame's IP and app, so one line says who, from where and why.
+  const logRefusal = (token: string, cause: unknown) => {
+    const rawReason =
+      typeof cause === "string"
+        ? cause
+        : (cause as { reason?: unknown } | null)?.reason;
     const reason =
       typeof rawReason === "string"
         ? rawReason.slice(0, 60)
-        : err instanceof Error
-          ? err.name
+        : cause instanceof Error
+          ? cause.name
           : "unknown";
-    const { sub, exp } = unverifiedClaims(token);
+    const { sub, exp } = unverifiedTokenClaims(token);
     const key = `${sub}:${reason}`;
     const now = Date.now();
     if (now - refusalWindowStart >= REFUSAL_LOG_WINDOW_MS) {
@@ -149,13 +140,12 @@ export function clerk(config: ClerkConfig): AuthAdapter {
       return;
     }
     refusalsLogged.add(key);
-    const expired =
-      exp !== undefined && now > exp * 1000
-        ? ` expiredAgoMs=${now - exp * 1000}`
-        : "";
-    log.warn(
-      `[parcae/auth-clerk] token refused reason=${JSON.stringify(reason)} user=${JSON.stringify(sub ?? "unknown")}${expired}`,
-    );
+    log.warn("[parcae/auth-clerk] token refused", {
+      reason,
+      user: sub,
+      expiredAgoMs:
+        exp !== undefined && now > exp * 1000 ? now - exp * 1000 : undefined,
+    });
   };
 
   async function serializeUser<T>(id: string, operation: () => Promise<T>) {
@@ -287,16 +277,23 @@ export function clerk(config: ClerkConfig): AuthAdapter {
     }
 
     const userId = payload.sub;
-    if (!userId) return null;
+    if (!userId) {
+      logRefusal(token, "token-without-sub");
+      return null;
+    }
 
     try {
       const localUser = await ensureLocalUser(userId);
-      if (!localUser) return null;
+      if (!localUser) {
+        // Deleted in Clerk, or no local row could be made for them.
+        logRefusal(token, "user-not-provisioned");
+        return null;
+      }
     } catch (err) {
-      log.error(
-        `[parcae/auth-clerk] Failed to provision local user ${userId}:`,
-        err,
-      );
+      log.error("[parcae/auth-clerk] Failed to provision local user", {
+        user: userId,
+        error: err,
+      });
       return null;
     }
 
@@ -473,10 +470,9 @@ export function clerk(config: ClerkConfig): AuthAdapter {
               res.writeHead(200, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ received: true }));
             } catch (err) {
-              log.error(
-                "[parcae/auth-clerk] Webhook processing error:",
-                err,
-              );
+              log.error("[parcae/auth-clerk] Webhook processing error", {
+                error: err,
+              });
               res.writeHead(500, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ error: "Internal error" }));
             }

@@ -20,7 +20,8 @@ import {
 import { SocketSessionReconciler } from "./socket-session-reconciler";
 import {
   clientDiagnostics,
-  logFields,
+  disconnectReason,
+  unverifiedTokenClaims,
   withinLogBudget,
 } from "./socket-diagnostics";
 import {
@@ -41,7 +42,17 @@ import {
   sessionBoundaryRefusal,
 } from "@parcae/model";
 import type { ModelConstructor, SchemaDefinition } from "@parcae/model";
-import { log } from "./logger";
+import { clientIp, parseClientIdentity } from "./client-identity";
+import {
+  BLANK_CONTEXT,
+  log,
+  newOperationId,
+  requestIdentity,
+  runInFrame,
+  socketFrameOf,
+  withLogContext,
+} from "./log";
+import { observeOutboundCalls } from "./outbound";
 import { ClientError } from "./helpers";
 import { generateSchemas } from "./schema/generate";
 import {
@@ -238,7 +249,7 @@ export interface ParcaeApp {
 async function discoverModels(dir: string): Promise<ModelConstructor[]> {
   const absDir = resolve(dir);
   if (!existsSync(absDir)) {
-    log.warn(`Models directory not found: ${absDir}`);
+    log.warn("Models directory not found", { dir: absDir });
     return [];
   }
 
@@ -266,10 +277,7 @@ async function discoverModels(dir: string): Promise<ModelConstructor[]> {
         }
       }
     } catch (err) {
-      log.warn(
-        `Failed to import model from ${name}:`,
-        err instanceof Error ? err.message : err,
-      );
+      log.warn("Failed to import model", { file: name, error: err });
     }
   }
 
@@ -368,14 +376,19 @@ async function discoverAndImport(
       await import(filePath);
       count++;
     } catch (err) {
-      log.warn(
-        `Failed to import ${label} from ${name}:`,
-        err instanceof Error ? err.message : err,
-      );
+      log.warn("Failed to import", { kind: label, file: name, error: err });
     }
   }
 
   return count;
+}
+
+/** Name the request after the pattern it matched, for its log line. */
+function markRoute(pattern: string) {
+  return (req: any, _res: any, next: () => void) => {
+    req._parcaeRoute = pattern;
+    next();
+  };
 }
 
 // ─── Cron scheduling ─────────────────────────────────────────────────────────
@@ -403,37 +416,52 @@ function startCron(entry: CronEntry, pubsub: PubSub): Cron {
       protect: protectPrev,
       timezone: entry.options.timezone,
     },
-    async () => {
-      // Round to the nearest second so contending processes hash the same
-      // tick window even with mild clock skew. The lock key includes the
-      // pattern so multiple crons that happen to share names across
-      // versions don't collide.
-      const tickMs = Math.floor(Date.now() / 1000) * 1000;
-      const lockKey = `cron:tick:${entry.name}:${tickMs}`;
-      // Hold the dedup key longer than any reasonable tick to absorb
-      // clock drift, capped at 5 minutes so a stuck process doesn't
-      // wedge the schedule forever.
-      const ttlMs = 5 * 60 * 1000;
-      let acquired = true;
-      try {
-        acquired = await pubsub.tryLock(lockKey, ttlMs);
-      } catch (err) {
-        log.warn(
-          `[cron:${entry.name}] tryLock failed (${(err as Error).message}); ` +
-            `firing anyway — duplicate execution possible`,
-        );
-      }
-      if (!acquired) return;
+    () => fireCron(entry, pubsub),
+  );
+}
 
-      const fireDate = new Date();
+/** One tick of a cron: the dedup lock, then the handler in a scheduled frame. */
+export async function fireCron(
+  entry: CronEntry,
+  pubsub: Pick<PubSub, "tryLock">,
+): Promise<void> {
+  // Round to the nearest second so contending processes hash the same
+  // tick window even with mild clock skew. The lock key includes the
+  // pattern so multiple crons that happen to share names across
+  // versions don't collide.
+  const tickMs = Math.floor(Date.now() / 1000) * 1000;
+  const lockKey = `cron:tick:${entry.name}:${tickMs}`;
+  // Hold the dedup key longer than any reasonable tick to absorb
+  // clock drift, capped at 5 minutes so a stuck process doesn't
+  // wedge the schedule forever.
+  const ttlMs = 5 * 60 * 1000;
+  let acquired = true;
+  try {
+    acquired = await pubsub.tryLock(lockKey, ttlMs);
+  } catch (err) {
+    log.warn(
+      "[cron] tryLock failed; firing anyway, duplicate execution possible",
+      { cron: entry.name, error: err },
+    );
+  }
+  if (!acquired) return;
+
+  const fireDate = new Date();
+  // Each tick is its own operation; what it enqueues names it as parent.
+  await runInFrame(
+    {
+      ...BLANK_CONTEXT,
+      operationId: newOperationId(),
+      trigger: "scheduled",
+      job: entry.name,
+    },
+    async () => {
       try {
         await entry.handler({
           data: { name: entry.name, pattern: entry.pattern, fireDate },
         });
       } catch (err) {
-        log.error(
-          `[cron:${entry.name}] handler threw: ${(err as Error).message}`,
-        );
+        log.error("[cron] handler threw", { cron: entry.name, error: err });
         // Don't rethrow — croner would silently swallow it anyway, and
         // we want the schedule to keep firing on the next tick.
       }
@@ -473,7 +501,7 @@ export function createSocketSessionController(
   authAdapter: AuthAdapter | null,
   subscriptions: SocketSessionSubscriptions,
   build?: string,
-  onExpired?: (detail: string) => void,
+  onExpired?: (detail: Record<string, string | number | undefined>) => void,
 ) {
   const reconciler = new SocketSessionReconciler<AuthSession>();
   let expiryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -485,7 +513,7 @@ export function createSocketSessionController(
   const lapse = () => {
     const now = Date.now();
     const expiresAt = reconciler.session?.expiresAt;
-    return logFields({
+    return {
       user: reconciler.session?.user?.id,
       expiredAgoMs:
         typeof expiresAt === "number" && Number.isFinite(expiresAt)
@@ -495,7 +523,7 @@ export function createSocketSessionController(
       renews,
       lastRenewAgoMs: lastRenewAt ? now - lastRenewAt : undefined,
       lastRenewRefusal,
-    });
+    };
   };
 
   // A non-finite expiry from a misbehaving adapter reads as expired.
@@ -566,6 +594,15 @@ export function createSocketSessionController(
       onBoundary?: () => Promise<void>,
     ): Promise<void> {
       const token = (payload as { token?: unknown } | null)?.token;
+      // Who the token says it is names the lines written while it is judged
+      // (a refusal), in a frame of their own: only a resolved session names
+      // the connection.
+      const claims =
+        typeof token === "string" && token ? unverifiedTokenClaims(token) : {};
+      const client = parseClientIdentity(
+        (payload as { client?: unknown } | null)?.client,
+      );
+      if (client) withLogContext(client);
       const result = await reconciler.reconcile(async () => {
         clearExpiry();
         // reconcile() has already cleared the published session, so an
@@ -576,7 +613,10 @@ export function createSocketSessionController(
         await onBoundary?.();
         if (authAdapter && typeof token === "string" && token) {
           try {
-            return await authAdapter.resolveToken(token);
+            return await runInFrame(
+              { user: claims.sub ?? null, org: null, role: null },
+              () => authAdapter.resolveToken(token),
+            );
           } catch {
             return null;
           }
@@ -586,6 +626,7 @@ export function createSocketSessionController(
       const session = result.applied ? result.session : reconciler.session;
       const userId = session?.user?.id ?? null;
       if (result.applied) {
+        withLogContext(requestIdentity({ session }));
         helloAt = Date.now();
         renews = 0;
         lastRenewAt = 0;
@@ -597,19 +638,22 @@ export function createSocketSessionController(
         );
         if (presented && authAdapter && !session) {
           if (withinLogBudget()) {
-            log.warn(
-              `[socket] hello refused its token ${logFields({ ...diag })}`.trimEnd(),
-            );
+            const exp = claims.exp;
+            log.warn("[socket] hello refused its token", {
+              user: claims.sub,
+              expiredAgoMs:
+                exp !== undefined && Date.now() > exp * 1000
+                  ? Date.now() - exp * 1000
+                  : undefined,
+              ...diag,
+            });
           }
         } else if (diag && withinLogBudget()) {
-          log.info(
-            `[socket] reconnected ${logFields({
-              user: userId,
-              token: presented ? undefined : "none",
-              ...expiryOf(session),
-              ...diag,
-            })}`,
-          );
+          log.info("[socket] reconnected", {
+            token: presented ? undefined : "none",
+            ...expiryOf(session),
+            ...diag,
+          });
         }
       }
       callback?.({
@@ -654,7 +698,7 @@ export function createSocketSessionController(
           lastRenewRefusal = reason;
         }
         if (withinLogBudget()) {
-          log.info(`[socket] renew refused ${logFields({ user, reason })}`);
+          log.info("[socket] renew refused", { user, reason });
         }
         return refused;
       };
@@ -855,6 +899,10 @@ export function createApp(config: AppConfig): ParcaeApp {
       // code (e.g. BackendAdapter.runHooks) can branch on them.
       flags = resolveRuntimeFlags(envConfig);
       _setRuntimeFlags(flags);
+      // Every line carries deployment, service and task; this one marks
+      // where a process's lines begin.
+      log.info("[parcae] process started", { node: process.version });
+      observeOutboundCalls();
 
       const jobsLabel =
         flags.jobs === true
@@ -1143,7 +1191,10 @@ export function createApp(config: AppConfig): ParcaeApp {
           // Skip for socket RPC calls — session already injected
           if (req._socketRpc) return next();
           try {
-            req.session = await authAdapter!.resolveRequest(req);
+            // Auth lines carry the IP; the request's own lines do not.
+            req.session = await runInFrame({ ip: clientIp(req) || null }, () =>
+              authAdapter!.resolveRequest(req),
+            );
           } catch {
             req.session = null;
           }
@@ -1192,11 +1243,13 @@ export function createApp(config: AppConfig): ParcaeApp {
               const result = hook(req, req.session ?? null, res);
               if (result instanceof Promise) {
                 result.catch((err: unknown) => {
-                  log.warn(`[onAuthenticatedRequest] async error: ${err}`);
+                  log.warn("[onAuthenticatedRequest] async error", {
+                    error: err,
+                  });
                 });
               }
             } catch (err) {
-              log.warn(`[onAuthenticatedRequest] error: ${err}`);
+              log.warn("[onAuthenticatedRequest] error", { error: err });
             }
             // If the hook wrote a response synchronously (e.g. a step-up
             // gate calling `error(res, 403, ...)`), short-circuit. Async
@@ -1292,7 +1345,11 @@ export function createApp(config: AppConfig): ParcaeApp {
           const method = entry.method.toLowerCase() as keyof typeof server.polka;
           if (typeof server.polka[method] === "function") {
             const handlers = [...entry.middlewares, entry.handler];
-            (server.polka[method] as any)(entry.path, ...handlers);
+            (server.polka[method] as any)(
+              entry.path,
+              markRoute(entry.path),
+              ...handlers,
+            );
           }
         }
       } else if (routes.length > 0) {
@@ -1495,6 +1552,24 @@ export function createApp(config: AppConfig): ParcaeApp {
       // expects it), but on worker-only processes it sits idle — no
       // clients should be hitting the worker URL anyway.
       if (flags.server) server.io.on("connection", (socket) => {
+        // The connection's log frame: one object for the socket's life,
+        // restored onto every listener by listenSafely. The hello names
+        // the user and app on it.
+        const handshake = socket.handshake;
+        const connectedAt = Date.now();
+        // A line defaults every key it does not find to null.
+        Object.assign(socketFrameOf(socket), {
+          trigger: "socket",
+          operationId: newOperationId(),
+          ip:
+            clientIp({
+              headers: handshake.headers,
+              socket: { remoteAddress: handshake.address },
+            }) || null,
+          ...parseClientIdentity(handshake.headers?.["x-freia-client"]),
+          // Only the user agent, so a client that names no app is inferred.
+          req: { headers: { "user-agent": handshake.headers?.["user-agent"] } },
+        });
         const socketSession = createSocketSessionController(
           socket.id,
           authAdapter,
@@ -1505,7 +1580,7 @@ export function createApp(config: AppConfig): ParcaeApp {
           // close and says hello with a fresh token, while a server
           // disconnect leaves socket.io-client offline for good.
           (detail) => {
-            log.info(`[socket] session expired, closing the connection ${detail}`);
+            log.info("[socket] session expired, closing the connection", detail);
             socket.conn.close();
           },
         );
@@ -1664,7 +1739,7 @@ export function createApp(config: AppConfig): ParcaeApp {
               // Run through Polka's full handler (includes middleware, auth, auto-CRUD, custom routes)
               (server!.polka as any).handler(fakeReq, fakeRes);
             } catch (err: any) {
-              log.error(`[socket] RPC error:`, err);
+              log.error("[socket] RPC error", { error: err });
               const compressed = pako.gzip(
                 JSON.stringify(
                   compress({
@@ -1780,7 +1855,7 @@ export function createApp(config: AppConfig): ParcaeApp {
                 callback?.({ success: false, error: SESSION_BOUNDARY_ERRORS.changed });
                 return;
               }
-              log.error("[socket] resync failed:", err);
+              log.error("[socket] resync failed", { error: err });
               callback?.({
                 success: false,
                 error:
@@ -1829,7 +1904,10 @@ export function createApp(config: AppConfig): ParcaeApp {
             try {
               await runSocketChain(entry.middlewares, entry.handler, ctx);
             } catch (err: any) {
-              log.error(`[socket] ${entry.event} error:`, err);
+              log.error("[socket] handler error", {
+                event: entry.event,
+                error: err,
+              });
               if (isSessionCurrent()) {
                 sessionSocket.emit("error", {
                   event: entry.event,
@@ -1849,7 +1927,13 @@ export function createApp(config: AppConfig): ParcaeApp {
           if (typeof hash === "string") subscriptions.unsubscribe(socket.id, hash);
         });
 
-        listenSafely(socket, "disconnect", () => {
+        listenSafely(socket, "disconnect", (reason: unknown) => {
+          if (withinLogBudget()) {
+            log.info("[socket] disconnected", {
+              reason: disconnectReason(reason),
+              connectedMs: Date.now() - connectedAt,
+            });
+          }
           socketSession.invalidate();
           socketRooms.invalidateSessionOutputs();
           void socketRooms.clearForBoundary().catch(() => {
@@ -1870,7 +1954,7 @@ export function createApp(config: AppConfig): ParcaeApp {
       await listenServer(server.httpServer, port);
 
       const exposedRoutes = flags.server ? routes.length + crudCount : 0;
-      log.success(
+      log.info(
         `Ready on port ${port} — ` +
           `${models.length} models, ` +
           `${exposedRoutes} routes` +

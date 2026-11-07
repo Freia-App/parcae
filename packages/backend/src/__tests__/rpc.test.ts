@@ -4,7 +4,7 @@ import { hook, getHooks, getHooksFor, clearHooks } from "../routing/hook";
 import { job, getJob, getJobs, clearJobs } from "../routing/job";
 import { cron, getCron, getCrons, clearCrons } from "../routing/cron";
 import { json, ok, error } from "../helpers";
-import { log } from "../logger";
+import { log } from "../log";
 import { parseConfig, resolveRuntimeFlags } from "../config";
 import { QueueService } from "../services/queue";
 
@@ -163,7 +163,6 @@ describe("logger", () => {
     expect(typeof log.info).toBe("function");
     expect(typeof log.warn).toBe("function");
     expect(typeof log.error).toBe("function");
-    expect(typeof log.success).toBe("function");
     expect(typeof log.debug).toBe("function");
   });
 });

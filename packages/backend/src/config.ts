@@ -39,7 +39,7 @@ function loadEnvFile(dir: string = process.cwd()): void {
  * Used by both `envBoolean` and `parseNameList` so the accepted set
  * is consistent.
  */
-function parseBoolString(v: string): boolean | null {
+export function parseBoolString(v: string): boolean | null {
   switch (v.trim().toLowerCase()) {
     case "true":
     case "1":

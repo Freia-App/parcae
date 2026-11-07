@@ -11,7 +11,7 @@
  */
 
 import type { Knex } from "knex";
-import { log } from "../../logger";
+import { log } from "../../log";
 import type { Engine } from "../../adapters/engine";
 import {
   classifyStatement,

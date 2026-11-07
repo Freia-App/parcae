@@ -5,6 +5,7 @@ import { Model } from "@parcae/model";
 import { createClient } from "../client";
 import type { ParcaeClient, ClientConfig } from "../client";
 import type { AuthClientAdapter } from "../auth-adapter";
+import type { SocketTransportConfig } from "../transports/socket";
 import { ParcaeContext } from "./context";
 import { _onResyncRequired, _purgeCacheForUser } from "./useQuery";
 import {
@@ -47,6 +48,8 @@ export interface ParcaeProviderProps {
    * render creates a fresh client.
    */
   extraHeaders?: Record<string, string>;
+  /** The hello's `client`; see `SocketTransportConfig.clientIdentity`. */
+  clientIdentity?: SocketTransportConfig["clientIdentity"];
   /**
    * Transport watchdog stale threshold in ms; `0` disables it.
    * Forwarded to the owned client's transport (url form only).
@@ -213,6 +216,7 @@ const OwnedProvider: React.FC<Omit<ParcaeProviderProps, "client">> = ({
   version = "v1",
   transports,
   extraHeaders,
+  clientIdentity,
   watchdogStaleMs,
   ...props
 }) => {
@@ -232,11 +236,20 @@ const OwnedProvider: React.FC<Omit<ParcaeProviderProps, "client">> = ({
       getToken,
       transports,
       extraHeaders,
+      clientIdentity,
       watchdogStaleMs,
     });
     setClient(owned);
     return () => owned.dispose();
-  }, [url, version, auth, transports, extraHeaders, watchdogStaleMs]);
+  }, [
+    url,
+    version,
+    auth,
+    transports,
+    extraHeaders,
+    clientIdentity,
+    watchdogStaleMs,
+  ]);
 
   if (!client) return null;
   return <ClientProvider {...props} url={url} auth={auth} client={client} />;

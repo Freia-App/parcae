@@ -1,6 +1,12 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { Job } from "bullmq";
-import { log } from "../logger";
+import {
+  currentFrame,
+  type LogApp,
+  type LogTrigger,
+  log,
+  requestIdentity,
+  runInFrame,
+} from "../log";
 /**
  * @parcae/backend — Global service context
  *
@@ -42,14 +48,21 @@ interface RequestContext {
   refLoader?: RefLoader | null;
 }
 
-const _requestContext = new AsyncLocalStorage<RequestContext>();
+// The request context rides the log frame (`../log.ts`), one async store
+// for who is acting. Only this function sets `requestUser`. A job's frame
+// names its parent's user for the log and sets no request user: from the
+// worker it has none, and run inline it keeps its caller's, as it did
+// before the two stores were one.
 
 /** Run a callback with request context (user) available to all downstream code. */
 export function runWithRequestContext<T>(
   ctx: RequestContext,
   fn: () => T,
 ): T {
-  return _requestContext.run(ctx, fn);
+  return runInFrame(
+    { requestUser: ctx.user, refLoader: ctx.refLoader ?? null },
+    fn,
+  );
 }
 
 /** Get the current request's user, if available. */
@@ -57,7 +70,7 @@ export function getRequestUser(): {
   id: string;
   [key: string]: any;
 } | null {
-  return _requestContext.getStore()?.user ?? null;
+  return currentFrame()?.requestUser ?? null;
 }
 
 /**
@@ -67,7 +80,7 @@ export function getRequestUser(): {
  * the loader exists for batching, not correctness.
  */
 export function getRefLoader(): RefLoader | null {
-  return _requestContext.getStore()?.refLoader ?? null;
+  return (currentFrame()?.refLoader as RefLoader | null | undefined) ?? null;
 }
 
 // ─── Global context (set by createApp at startup) ────────────────────────────
@@ -153,6 +166,10 @@ export interface EnqueueOptions {
  * workers can subscribe selectively (`RUN_JOBS=panel,image`) and external
  * consumers can pick up specific jobs without seeing unrelated work.
  *
+ * Inside a log frame, `data._ctx` is set to the frame's ids (request,
+ * operation, user, org, app) so the job's lines name what queued it; the
+ * key is Parcae's, and a caller's own `_ctx` is replaced.
+ *
  * ```typescript
  * import { enqueue } from "@parcae/backend";
  *
@@ -166,9 +183,9 @@ export async function enqueue(
   options: EnqueueOptions = {},
 ): Promise<Job | false | null> {
   if (!_queue) {
-    log.warn(
-      `[parcae] enqueue("${name}"): no queue configured (REDIS_URL not set)`,
-    );
+    log.warn("[parcae] enqueue: no queue configured (REDIS_URL not set)", {
+      job: name,
+    });
     return false;
   }
 
@@ -177,10 +194,11 @@ export async function enqueue(
   const queueName = _queue.queueNameFor(name);
   const queue = _queue.get(queueName);
   if (!queue) {
-    log.warn(`enqueue("${name}"): queue not available`);
+    log.warn("[parcae] enqueue: queue not available", { job: name });
     return false;
   }
 
+  data = stampJobContext(data);
   if (options.jobId) {
     return await addJobIfNotExists(queue, name, data, {
       jobId: options.jobId.replace(/:/g, "."),
@@ -193,6 +211,40 @@ export async function enqueue(
     removeOnComplete: options.removeOnComplete ?? 100,
     removeOnFail: options.removeOnFail ?? 50,
   });
+}
+
+/**
+ * The enqueuing frame, carried on the job's data as `_ctx` so the job's
+ * lines name the request (or cron, or job) that caused them. Ids only.
+ */
+export interface JobLogContext {
+  requestId: string | null;
+  operationId: string | null;
+  trigger: LogTrigger | null;
+  user: string | null;
+  org: string | null;
+  app: LogApp | null;
+}
+
+function stampJobContext(data: any): any {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return data;
+  const ctx = jobLogContext();
+  return ctx ? { ...data, _ctx: ctx } : data;
+}
+
+/** The current frame as a job's `_ctx`, or null outside any frame. */
+export function jobLogContext(): JobLogContext | null {
+  const frame = currentFrame();
+  if (!frame) return null;
+  const who = requestIdentity(frame.req);
+  return {
+    requestId: frame.requestId ?? null,
+    operationId: frame.operationId ?? null,
+    trigger: frame.trigger ?? null,
+    user: who.user ?? frame.user ?? null,
+    org: who.org ?? frame.org ?? null,
+    app: frame.app ?? null,
+  };
 }
 
 // ─── lock() ──────────────────────────────────────────────────────────────────

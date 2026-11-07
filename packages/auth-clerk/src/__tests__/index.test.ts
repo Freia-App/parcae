@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AddressInfo } from "node:net";
 import {
+  captureLogs,
   createServer_,
   log,
+  withLogContext,
   type AuthSetupContext,
   type Config,
 } from "@parcae/backend";
@@ -75,7 +77,7 @@ describe("clerk server adapter", () => {
 
   it("logs why it refused a token, once a minute per user and reason", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_900_000_090_000);
-    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const logs = captureLogs();
     mocks.verifyToken.mockRejectedValue(
       Object.assign(new Error("JWT is expired"), { reason: "token-expired" }),
     );
@@ -86,24 +88,47 @@ describe("clerk server adapter", () => {
     const auth = clerk(config);
     await auth.setup(setupContext());
 
-    await expect(auth.resolveToken(token)).resolves.toBeNull();
-    await expect(auth.resolveToken(token)).resolves.toBeNull();
-    expect(warn.mock.calls).toEqual([
-      [
-        '[parcae/auth-clerk] token refused reason="token-expired" user="user_9" expiredAgoMs=30000',
-      ],
-    ]);
+    // Inside a socket hello's frame, as the server resolves it.
+    await withLogContext(
+      { ip: "203.0.113.9", app: "mobile", appVersion: "2.47.0", trigger: "socket" },
+      async () => {
+        await expect(auth.resolveToken(token)).resolves.toBeNull();
+        await expect(auth.resolveToken(token)).resolves.toBeNull();
+      },
+    );
+    expect(logs.lines).toHaveLength(1);
+    expect(logs.lines[0]).toMatchObject({
+      level: "warn",
+      tag: "parcae/auth-clerk",
+      msg: "token refused",
+      reason: "token-expired",
+      user: "user_9",
+      expiredAgoMs: 30_000,
+      ip: "203.0.113.9",
+      app: "mobile",
+      appVersion: "2.47.0",
+    });
 
     now.mockReturnValue(1_900_000_150_001);
     await auth.resolveToken(token);
-    expect(warn).toHaveBeenCalledTimes(2);
+    expect(logs.lines).toHaveLength(2);
+    logs.stop();
     now.mockRestore();
-    warn.mockRestore();
+  });
+
+  it("names why a verified token gave no session", async () => {
+    const logs = captureLogs();
+    mocks.verifyToken.mockResolvedValue({});
+    const auth = clerk(config);
+    await auth.setup(setupContext());
+    await expect(auth.resolveToken("header.e30.sig")).resolves.toBeNull();
+    expect(logs.lines.map((l) => l.reason)).toEqual(["token-without-sub"]);
+    logs.stop();
   });
 
   it("caps a minute's refusal lines however many user ids the tokens claim", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_900_000_000_000);
-    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const logs = captureLogs();
     mocks.verifyToken.mockRejectedValue(
       Object.assign(new Error("bad signature"), {
         reason: "token-invalid-signature",
@@ -117,12 +142,14 @@ describe("clerk server adapter", () => {
       ).toString("base64url");
       await auth.resolveToken(`header.${claims}.signature`);
     }
-    expect(warn).toHaveBeenCalledTimes(50);
-    expect(warn.mock.calls[0]).toEqual([
-      '[parcae/auth-clerk] token refused reason="token-invalid-signature" user="user_0"',
-    ]);
+    expect(logs.lines).toHaveLength(50);
+    expect(logs.lines[0]).toMatchObject({
+      msg: "token refused",
+      reason: "token-invalid-signature",
+      user: "user_0",
+    });
+    logs.stop();
     now.mockRestore();
-    warn.mockRestore();
   });
 
   it("reads the org role from the v2 JWT claim without calling the Clerk API", async () => {

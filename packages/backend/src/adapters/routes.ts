@@ -39,7 +39,7 @@ import type { ModelConstructor, ScopeContext } from "@parcae/model";
 import { isClientWritableKey, isUnsafePatchPath, Model } from "@parcae/model";
 import pluralize from "pluralize";
 import { ClientError, json, notFound, forbidden } from "../helpers";
-import { log } from "../logger";
+import { log } from "../log";
 import { route } from "../routing/route";
 import {
   prepareClientQuery,
@@ -305,7 +305,7 @@ function respondWithError(
     });
     return;
   }
-  log.error(`[routes] ${where} error:`, err);
+  log.error("[routes] handler error", { where, error: err });
   json(res, 500, {
     result: null,
     success: false,

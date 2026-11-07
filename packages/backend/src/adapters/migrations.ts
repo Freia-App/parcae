@@ -28,7 +28,7 @@
 
 import type { Knex } from "knex";
 import type { ModelConstructor } from "@parcae/model";
-import { log } from "../logger";
+import { log } from "../log";
 import type { Engine } from "./engine";
 import type { BackendAdapter } from "./model";
 import type {
@@ -122,9 +122,8 @@ export async function writeMetaRowWithRetry(
     return;
   } catch (err) {
     log.warn(
-      `[parcae] meta write for non-tx migration "${row.name}" failed, retrying in 100ms — ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      "[parcae] meta write for non-tx migration failed, retrying in 100ms",
+      { migration: row.name, error: err },
     );
   }
   await new Promise((r) => setTimeout(r, 100));
@@ -132,10 +131,9 @@ export async function writeMetaRowWithRetry(
     await writer(db, row);
   } catch (err) {
     log.error(
-      `[parcae] meta write for non-tx migration "${row.name}" failed on retry — ` +
-        `the schema change has ALREADY committed but parcae_migration_meta has no row. ` +
-        `Manual recovery: insert a row into parcae_migration_meta matching the succeeded migration. ` +
-        `Error: ${err instanceof Error ? err.message : String(err)}`,
+      "[parcae] meta write for non-tx migration failed on retry: the schema change has ALREADY committed but parcae_migration_meta has no row. " +
+        "Manual recovery: insert a row into parcae_migration_meta matching the succeeded migration.",
+      { migration: row.name, error: err },
     );
     throw err;
   }
@@ -333,9 +331,10 @@ export async function runMigrations(
   await ensureMetaTable(opts.db);
 
   const meta = await readMetaRows(opts.db);
-  log.info(
-    `Verifying migration checksums — ${meta.size} applied, ${sorted.length} registered`,
-  );
+  log.info("Verifying migration checksums", {
+    applied: meta.size,
+    registered: sorted.length,
+  });
   verifyChecksums(sorted, meta, opts.allowChecksumDrift ?? false);
 
   const source = new ParcaeMigrationSource(
@@ -345,7 +344,7 @@ export async function runMigrations(
   );
   const tableName = opts.tableName ?? MIGRATIONS_TABLE;
 
-  log.info(`Running migrations — ${total} registered`);
+  log.info("Running migrations", { registered: total });
 
   const result = (await opts.db.migrate.latest({
     tableName,
@@ -355,7 +354,7 @@ export async function runMigrations(
   const applied = Array.isArray(result) ? (result[1] ?? []) : [];
 
   if (applied.length === 0) {
-    log.info(`Migrations up to date — ${total} total, 0 applied`);
+    log.info("Migrations up to date", { total, applied: 0 });
   } else {
     const postMeta = await readMetaRows(opts.db);
     for (const name of applied) {
@@ -366,11 +365,12 @@ export async function runMigrations(
       if (ms !== undefined) parts.push(`${ms}ms`);
       if (effect) parts.push(effect);
       const suffix = parts.length > 0 ? ` (${parts.join(", ")})` : "";
-      log.success(`Applied migration: ${name}${suffix}`);
+      log.info(`Applied migration: ${name}${suffix}`);
     }
-    log.info(
-      `Migrations complete — ${applied.length} applied, ${total - applied.length} already up to date`,
-    );
+    log.info("Migrations complete", {
+      applied: applied.length,
+      upToDate: total - applied.length,
+    });
   }
 
   return { applied, total };

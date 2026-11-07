@@ -6,12 +6,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSocketSessionController } from "../app";
 import type { AuthAdapter, AuthSession } from "../auth";
-import { log } from "../logger";
-import {
-  clientDiagnostics,
-  logFields,
-  withinLogBudget,
-} from "../socket-diagnostics";
+import { captureLogs, type Line, withLogContext } from "../log";
+import { clientDiagnostics, withinLogBudget } from "../socket-diagnostics";
 
 const subscriptions = { unsubscribeAll: () => {} };
 const NOW = 1_900_000_000_000;
@@ -23,6 +19,26 @@ function adapterWith(
   return {
     resolveToken: async (token: string) => sessions[token]?.() ?? null,
   } as unknown as AuthAdapter;
+}
+
+/** The line minus the fields every line carries. */
+function own(line: Line): Record<string, unknown> {
+  const {
+    schema: _s,
+    at: _a,
+    service: _sv,
+    environment: _e,
+    deployment: _d,
+    lane: _l,
+    task: _t,
+    ...rest
+  } = line;
+  return Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== null));
+}
+
+function jwt(payload: Record<string, unknown>): string {
+  const part = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  return `${part({ alg: "none" })}.${part(payload)}.sig`;
 }
 
 function session(role: string, expiresInMs: number): () => AuthSession {
@@ -48,7 +64,6 @@ describe("client diagnostics from a hello", () => {
         nested: { a: 1 },
       }),
     ).toEqual({
-      disconnect: "transport close".repeat(10).slice(0, 40),
       offlineMs: 4_201,
       hiddenAtDisconnect: true,
       renewAttempts: 0,
@@ -63,49 +78,59 @@ describe("client diagnostics from a hello", () => {
     expect(clientDiagnostics("diag")).toBeNull();
     expect(clientDiagnostics(null)).toBeNull();
   });
-
-  it("quotes string values so none can forge a field or a line", () => {
-    expect(
-      logFields({ user: 'u1" admin=true\nfake', renews: 2, gone: undefined }),
-    ).toBe('user="u1\\" admin=true\\nfake" renews=2');
-  });
 });
 
 describe("socket session log lines", () => {
-  let info: ReturnType<typeof vi.spyOn>;
-  let warn: ReturnType<typeof vi.spyOn>;
+  let logs: ReturnType<typeof captureLogs>;
 
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    info = vi.spyOn(log, "info").mockImplementation(() => {});
-    warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    logs = captureLogs();
   });
   afterEach(() => {
+    logs.stop();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
-  it("says a hello refused its token, with the client's account of the drop", async () => {
+  it("says a hello refused its token, naming the user from its unverified claims", async () => {
     const controller = createSocketSessionController(
       "s1",
       adapterWith({}),
       subscriptions,
     );
-    await controller.hello({
-      token: "stale",
-      diag: {
-        disconnect: "transport close",
+    await withLogContext({ trigger: "socket", ip: "203.0.113.9" }, () =>
+      controller.hello({
+        token: jwt({ sub: "user_2abcDEF", exp: NOW / 1000 - 30 }),
+        client: "dashboard/2026.11.07/web",
+        diag: {
+          disconnect: "transport close",
+          offlineMs: 900,
+          renewAttempts: 8,
+          renewLateMs: 0,
+          renewOutcome: "token-unchanged",
+        },
+      }),
+    );
+    expect(logs.lines.map(own)).toEqual([
+      {
+        level: "warn",
+        tag: "socket",
+        msg: "hello refused its token",
+        user: "user_2abcDEF",
+        ip: "203.0.113.9",
+        app: "dashboard",
+        appVersion: "2026.11.07",
+        platform: "web",
+        trigger: "socket",
+        expiredAgoMs: 30_000,
+        disconnect: "transport-close",
         offlineMs: 900,
         renewAttempts: 8,
         renewLateMs: 0,
         renewOutcome: "token-unchanged",
       },
-    });
-    expect(warn.mock.calls).toEqual([
-      [
-        '[socket] hello refused its token disconnect="transport close" offlineMs=900 renewAttempts=8 renewLateMs=0 renewOutcome="token-unchanged"',
-      ],
     ]);
   });
 
@@ -115,14 +140,27 @@ describe("socket session log lines", () => {
       adapterWith({ t1: session("org:admin", 12_000) }),
       subscriptions,
     );
-    await controller.hello({
-      token: "t1",
-      diag: { disconnect: "transport close", offlineMs: 5_000, renewAttempts: 1, renewLateMs: 61_000 },
-    });
-    expect(info.mock.calls).toEqual([
-      [
-        '[socket] reconnected user="u1" expiresInMs=12000 disconnect="transport close" offlineMs=5000 renewAttempts=1 renewLateMs=61000',
-      ],
+    await withLogContext({ trigger: "socket" }, () =>
+      controller.hello({
+        token: "t1",
+        diag: { disconnect: "transport close", offlineMs: 5_000, renewAttempts: 1, renewLateMs: 61_000 },
+      }),
+    );
+    expect(logs.lines.map(own)).toEqual([
+      {
+        level: "info",
+        tag: "socket",
+        msg: "reconnected",
+        user: "u1",
+        org: "o1",
+        role: "admin",
+        trigger: "socket",
+        expiresInMs: 12_000,
+        disconnect: "transport-close",
+        offlineMs: 5_000,
+        renewAttempts: 1,
+        renewLateMs: 61_000,
+      },
     ]);
   });
 
@@ -133,8 +171,7 @@ describe("socket session log lines", () => {
       subscriptions,
     );
     await controller.hello({ token: "t1" });
-    expect(info).not.toHaveBeenCalled();
-    expect(warn).not.toHaveBeenCalled();
+    expect(logs.lines).toEqual([]);
   });
 
   it("logs why a renew was refused, and the lapse line carries the renewal history", async () => {
@@ -159,14 +196,27 @@ describe("socket session log lines", () => {
     await expect(controller.renew({ token: "t3" })).resolves.toMatchObject({
       success: false,
     });
-    expect(info.mock.calls).toEqual([
-      ['[socket] renew refused user="u1" reason="changed"'],
+    expect(logs.lines.map(own)).toEqual([
+      {
+        level: "info",
+        tag: "socket",
+        msg: "renew refused",
+        user: "u1",
+        reason: "changed",
+      },
     ]);
 
     await vi.advanceTimersByTimeAsync(15_000);
     expect(onExpired.mock.calls).toEqual([
       [
-        'user="u1" expiredAgoMs=0 sessionAgeMs=105000 renews=1 lastRenewAgoMs=60000 lastRenewRefusal="changed"',
+        {
+          user: "u1",
+          expiredAgoMs: 0,
+          sessionAgeMs: 105_000,
+          renews: 1,
+          lastRenewAgoMs: 60_000,
+          lastRenewRefusal: "changed",
+        },
       ],
     ]);
   });
@@ -174,7 +224,7 @@ describe("socket session log lines", () => {
   it("does not call a token refused when the app checks no tokens", async () => {
     const controller = createSocketSessionController("s1", null, subscriptions);
     await controller.hello({ token: "t1" });
-    expect(warn).not.toHaveBeenCalled();
+    expect(logs.lines).toEqual([]);
   });
 
   it("leaves a renew refusal off the session a newer hello replaced it with", async () => {
@@ -202,12 +252,27 @@ describe("socket session log lines", () => {
     await controller.hello({ token: "t3" });
     finishRenew(session("org:admin", 60_000)());
     await expect(renewing).resolves.toMatchObject({ success: false });
-    expect(info.mock.calls).toEqual([
-      ['[socket] renew refused user="u1" reason="superseded"'],
+    expect(logs.lines.map(own)).toEqual([
+      {
+        level: "info",
+        tag: "socket",
+        msg: "renew refused",
+        user: "u1",
+        reason: "superseded",
+      },
     ]);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(onExpired.mock.calls).toEqual([
-      ['user="u1" expiredAgoMs=0 sessionAgeMs=60000 renews=0'],
+      [
+        {
+          user: "u1",
+          expiredAgoMs: 0,
+          sessionAgeMs: 60_000,
+          renews: 0,
+          lastRenewAgoMs: undefined,
+          lastRenewRefusal: undefined,
+        },
+      ],
     ]);
   });
 });

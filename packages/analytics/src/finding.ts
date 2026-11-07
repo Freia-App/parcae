@@ -96,8 +96,8 @@ async function safeRun(
   try {
     return await d.detect(ctx, findings);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log.warn(`[detector ${d.key}] failed: ${msg}`);
+    // A detector's SQL error can echo the values it read.
+    log.warn("[detector] failed", { detector: d.key, error: err });
     return [];
   }
 }

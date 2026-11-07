@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { log } from "./logger";
+import { log, runWithFrame, socketFrameOf } from "./log";
 
 /**
  * Client frames reach socket listeners exactly as sent: any argument can be
@@ -22,16 +22,23 @@ export function listenSafely(
   event: string,
   listener: (...args: any[]) => unknown,
 ): void {
+  // Socket.IO calls listeners from the connection's IO, outside any frame,
+  // so each one runs in the socket's own frame (opened at connection).
+  const frame = socketFrameOf(socket);
   const fail = (err: unknown) => {
-    log.error(`[socket] ${event} handler failed:`, err);
+    runWithFrame(frame, () =>
+      log.error("[socket] handler failed", { event, error: err }),
+    );
   };
   socket.on(event, (...args: any[]) => {
-    try {
-      const result = listener(...args);
-      if (result instanceof Promise) result.catch(fail);
-    } catch (err) {
-      fail(err);
-    }
+    runWithFrame(frame, () => {
+      try {
+        const result = listener(...args);
+        if (result instanceof Promise) result.catch(fail);
+      } catch (err) {
+        fail(err);
+      }
+    });
   });
 }
 

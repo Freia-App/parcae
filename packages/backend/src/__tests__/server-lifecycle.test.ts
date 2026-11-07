@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer_, listenServer } from "../server";
 import { wrapHttpHandler } from "../routing/route";
 import { shutdownResources } from "../shutdown";
-import { log } from "../logger";
+import { log } from "../log";
 
 describe("listenServer", () => {
   it("rejects EADDRINUSE instead of leaving startup pending", async () => {

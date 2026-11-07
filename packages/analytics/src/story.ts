@@ -163,7 +163,7 @@ async function composeAll(
   );
   for (const s of settled) {
     if (s.status !== "fulfilled") {
-      log.warn(`[projection] composer rejected: ${s.reason}`);
+      log.warn("[projection] composer rejected", { error: s.reason });
       continue;
     }
     const { finding, composed } = s.value;

@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 
-import { log } from '../logger';
+import { log } from '../log';
 import { PARCAE_CHANGE_CHANNEL } from './change-triggers';
 
 export const PARCAE_CHANNEL = PARCAE_CHANGE_CHANNEL;
@@ -187,7 +187,7 @@ export class ChangeBus {
     this.client = client;
 
     client.on('error', (err: Error) => {
-      log.warn(`changeBus: client error: ${err.message}`);
+      log.warn("changeBus: client error", { error: err });
       if (this._isCurrent(generation) && this.client === client) {
         this._handleDisconnect();
       }
@@ -206,7 +206,7 @@ export class ChangeBus {
         try {
           listener(change);
         } catch (err) {
-          log.warn(`changeBus: listener threw: ${String(err)}`);
+          log.warn("changeBus: listener threw", { error: err });
         }
       }
     });
@@ -244,13 +244,13 @@ export class ChangeBus {
     const reconnected = this.state === 'started';
     this.reconnectAttempt = 0;
     this._scheduleHeartbeat(generation);
-    log.info(`changeBus: subscribed to "${PARCAE_CHANNEL}"`);
+    log.info("changeBus: subscribed", { channel: PARCAE_CHANNEL });
     if (reconnected) {
       for (const listener of this.reconnectListeners) {
         try {
           listener();
         } catch (err) {
-          log.warn(`changeBus: reconnect listener threw: ${String(err)}`);
+          log.warn("changeBus: reconnect listener threw", { error: err });
         }
       }
     }
@@ -289,7 +289,7 @@ export class ChangeBus {
     // A failed notifier must not take the process down on its own error
     // event; the probe result below is the only verdict that counts.
     notifier.on('error', (err: Error) => {
-      log.warn(`changeBus: probe notifier error: ${err.message}`);
+      log.warn("changeBus: probe notifier error", { error: err });
     });
     try {
       await notifier.connect();
@@ -403,9 +403,10 @@ export class ChangeBus {
       this.maxReconnectDelay,
     );
     this.reconnectAttempt++;
-    log.info(
-      `changeBus: reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`,
-    );
+    log.info("changeBus: reconnecting", {
+      delayMs: delay,
+      attempt: this.reconnectAttempt,
+    });
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (this.state !== 'started') return;
@@ -444,9 +445,9 @@ export class ChangeBus {
     } catch (err) {
       // A disconnect during the probe has already started a reconnect.
       if (!this._isCurrent(generation) || this.client !== client) return;
-      log.warn(
-        `changeBus: liveness check failed, reconnecting: ${(err as Error).message}`,
-      );
+      log.warn("changeBus: liveness check failed, reconnecting", {
+        error: err,
+      });
       this._handleDisconnect();
       return;
     }
@@ -476,7 +477,7 @@ export class ChangeBus {
     try {
       await this._trackConnect(generation);
     } catch (err) {
-      log.warn(`changeBus: reconnect failed: ${(err as Error).message}`);
+      log.warn("changeBus: reconnect failed", { error: err });
       if (this._isCurrent(generation)) this._scheduleReconnect();
     }
   }
