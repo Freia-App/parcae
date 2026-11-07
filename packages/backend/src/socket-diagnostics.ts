@@ -68,8 +68,8 @@ export function clientDiagnostics(raw: unknown): Record<string, Field> | null {
   return Object.keys(out).length > 0 ? out : null;
 }
 
-// socket.io's disconnect reasons, server and client side, as codes that
-// survive the log's no-whitespace rule. Anything else is not logged.
+// socket.io's disconnect reasons, server and client side, as codes a query
+// can group by. Anything else is not logged.
 const DISCONNECT_REASONS = new Map(
   [
     "transport close",

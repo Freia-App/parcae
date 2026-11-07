@@ -207,8 +207,6 @@ export {
   markJobOutcome,
 } from "./log";
 export type {
-  Field,
-  Fields,
   JobOutcome,
   LogFields,
   LogContext,

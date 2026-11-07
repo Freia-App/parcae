@@ -966,10 +966,13 @@ export function createApp(config: AppConfig): ParcaeApp {
       // depend on setting an env; DB_POOL_MAX overrides it per-deployment.
       const dbPoolMax = Math.max(2, Number(process.env.DB_POOL_MAX) || 25);
 
+      // A failed query's error is logged whole, and Knex would otherwise write
+      // its bound values (tokens, secrets, a row's fields) into the message.
       const writeDb = knex({
         client: "pg",
         connection: envConfig.DATABASE_URL,
         pool: { min: 2, max: dbPoolMax },
+        compileSqlOnError: false,
       });
       resources.writeDb = writeDb;
       let readDb: ReturnType<typeof knex>;
@@ -978,6 +981,7 @@ export function createApp(config: AppConfig): ParcaeApp {
           client: "pg",
           connection: envConfig.DATABASE_READ_URL,
           pool: { min: 2, max: dbPoolMax },
+          compileSqlOnError: false,
         });
       } else {
         readDb = writeDb;

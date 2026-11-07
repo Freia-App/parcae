@@ -48,8 +48,11 @@ it("names the table and duration of a slow or failed query, never its SQL", () =
     ["slow query", "patients", "select", 750, "read"],
     ["query failed", "patients", "insert", 0, "read"],
   ]);
-  expect(logs.lines[1]).toMatchObject({ level: "error", errorCode: "23505" });
-  expect(JSON.stringify(logs.lines)).not.toContain("jane");
+  expect(logs.lines[1]).toMatchObject({
+    level: "error",
+    errorCode: "23505",
+    errorMessage: "Key (email)=(jane@example.com) exists",
+  });
 });
 
 it("names a table whose quoted name has a hyphen", () => {

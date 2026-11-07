@@ -1,6 +1,6 @@
 /**
  * Every line names who and what it is about from the frame it was written
- * in, and a caller field cannot carry prose. The frame paths are driven
+ * in, and keeps the caller's fields as passed, under one cap. The frame paths are driven
  * through the seams that open them: the HTTP middleware, a socket
  * listener, a job enqueued from a request, a cron tick, and an outbound
  * call; plus the callback that leaves its frame.
@@ -37,37 +37,105 @@ afterEach(() => {
 const lines = (msg: string) => logs.lines.filter((l) => l.msg === msg);
 const UUID = /^[0-9a-f-]{36}$/;
 
-describe("the field rule", () => {
-  it("drops prose and keeps identifiers, counting what it dropped", () => {
-    log.warn("x", { note: "patient said their knee hurts" });
+describe("caller fields", () => {
+  it("keeps prose and identifiers as passed", () => {
+    log.warn("x", { note: "patient said their knee hurts", email: "jane@example.com" });
     log.warn("y", { connectionId: "conn_8fK2", status: 424 });
-    const [dropped, kept] = logs.lines;
-    expect(dropped).not.toHaveProperty("note");
-    expect(dropped!.droppedFields).toBe(1);
-    expect(kept).toMatchObject({ connectionId: "conn_8fK2", status: 424 });
-    expect(kept).not.toHaveProperty("droppedFields");
+    const [prose, ids] = logs.lines;
+    expect(prose).toMatchObject({ note: "patient said their knee hurts", email: "jane@example.com" });
+    expect(ids).toMatchObject({ connectionId: "conn_8fK2", status: 424 });
+    expect(prose).not.toHaveProperty("truncatedFields");
   });
 
-  it("drops long strings, dates, arrays, objects, emails, phones and encoded prose", () => {
+  it("cuts a long string, keeps dates, arrays and objects as JSON, and counts the cuts", () => {
+    const report = { rows: Array.from({ length: 300 }, (_, i) => ({ id: `row_${i}` })) };
     log.info("z", {
-      long: "a".repeat(81),
-      edge: "b".repeat(80),
+      long: "a".repeat(2001),
+      edge: "b".repeat(2000),
       dob: new Date("1961-03-04"),
-      list: ["a"],
-      nested: { a: 1 },
-      email: "jane@example.com",
-      phone: "+61412345678",
-      encoded: "patient%20said%20knee%20hurts",
-      plussed: "knee+hurts+badly",
+      list: ["a", 1],
+      nested: { a: { b: [true] } },
+      report,
     });
-    expect(logs.lines[0]).toMatchObject({ edge: "b".repeat(80), droppedFields: 8 });
+    const line = logs.lines[0]!;
+    expect(line).toMatchObject({
+      long: "a".repeat(2000),
+      edge: "b".repeat(2000),
+      dob: "1961-03-04T00:00:00.000Z",
+      list: ["a", 1],
+      nested: { a: { b: [true] } },
+      truncatedFields: 2,
+    });
+    expect(line.report).toBe(JSON.stringify(report).slice(0, 2000));
+    // The line is still one JSON object a query can read.
+    expect(JSON.parse(JSON.stringify(line))).toEqual(line);
   });
 
-  it("keeps an error's name, code and status, never its message", () => {
+  it("writes nested errors, buffers, bigints and cycles as JSON, and survives a throwing getter", () => {
+    const cycle: Record<string, unknown> = { id: "a" };
+    cycle.self = cycle;
+    const settled = { status: "rejected", reason: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) };
+    log.info("x", {
+      settled,
+      body: Buffer.from("hello"),
+      count: 12n,
+      cycle,
+      broken: Object.defineProperty({}, "boom", { enumerable: true, get: () => { throw new Error("getter"); } }),
+    });
+    expect(logs.lines[0]).toMatchObject({
+      settled: { status: "rejected", reason: { name: "Error", code: "ETIMEDOUT", message: "timed out" } },
+      body: "<5 bytes>",
+      count: "12",
+      cycle: { id: "a", self: "[Circular]" },
+      broken: "[unserializable]",
+    });
+  });
+
+  it("cuts a million-row result at the cap without walking the rest", () => {
+    const rows = Array.from({ length: 1_000_000 }, (_, i) => ({ id: i }));
+    const started = performance.now();
+    log.info("rows", { rows });
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(logs.lines[0]!.rows).toBe(JSON.stringify(rows.slice(0, 200)).slice(0, 2000));
+    expect(logs.lines[0]!.truncatedFields).toBe(1);
+  });
+
+  it("keeps a line under Docker's 16 KB split by giving up its longest fields", () => {
+    log.error("[api] failed", {
+      ...Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`text${i}`, "é".repeat(2000)])),
+      id: "row_1",
+      error: new Error("boom"),
+    });
+    const line = logs.lines[0]!;
+    expect(Buffer.byteLength(JSON.stringify(line))).toBeLessThanOrEqual(15_000);
+    expect(line).toMatchObject({ id: "row_1", errorMessage: "boom" });
+    const kept = Object.keys(line).filter((key) => key.startsWith("text"));
+    expect(line.truncatedFields).toBe(10 - kept.length);
+  });
+
+  it("names a failed fetch's cause, which is where the reason is", () => {
+    const err = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("connect ECONNREFUSED 10.0.0.7:443"), { code: "ECONNREFUSED" }),
+    });
+    log.error("[terra] pull failed", { error: err });
+    expect(logs.lines[0]).toMatchObject({
+      errorName: "TypeError",
+      errorMessage: "fetch failed",
+      errorCause: { name: "Error", code: "ECONNREFUSED", message: "connect ECONNREFUSED 10.0.0.7:443" },
+    });
+  });
+
+  it("writes an error's name, code, status, message and every stack frame", () => {
     const err = Object.assign(new Error("Key (email)=(jane@example.com) exists"), {
       code: "23505",
       status: 409,
     });
+    err.stack = [
+      "Error: Key (email)=(jane@example.com) exists",
+      "    at Object.handler (/srv/app/controllers/patients.ts:42:11)",
+      "    at node:internal/process/task_queues:95:5",
+      "    at run (/srv/app/node_modules/knex/lib/runner.js:140:9)",
+    ].join("\n");
     log.error("[db] write failed", { error: err });
     log.error("[db] whole error", err as never);
     const [a, b] = logs.lines;
@@ -77,31 +145,27 @@ describe("the field rule", () => {
       errorName: "Error",
       errorCode: "23505",
       errorStatus: 409,
+      errorMessage: "Key (email)=(jane@example.com) exists",
+      errorStack: [
+        "    at Object.handler (/srv/app/controllers/patients.ts:42:11)",
+        "    at node:internal/process/task_queues:95:5",
+        "    at run (/srv/app/node_modules/knex/lib/runner.js:140:9)",
+      ].join("\n"),
     });
-    expect(JSON.stringify(logs.lines)).not.toContain("jane");
-    expect(b).toMatchObject({ errorName: "Error", errorCode: "23505" });
+    expect(b).toMatchObject({ errorName: "Error", errorMessage: "Key (email)=(jane@example.com) exists" });
   });
 
-  it("says where an error was thrown, in app code only, and never what it said", () => {
-    const err = new Error("patient said\n    at their knee (hurts.ts:1:1)");
-    err.stack = [
-      "Error: patient said",
-      "    at their knee (hurts.ts:1:1)",
-      "    at Object.handler (/srv/app/controllers/patients.ts:42:11)",
-      "    at node:internal/process/task_queues:95:5",
-      "    at run (/srv/app/node_modules/knex/lib/runner.js:140:9)",
-      "    at async file:///srv/app/services/sync.ts:17:3",
-      "    at Polka.handler (/srv/app/server.ts:191:20)",
-      "    at a (/srv/app/a.ts:1:1)",
-      "    at b (/srv/app/b.ts:2:2)",
-      "    at c (/srv/app/c.ts:3:3)",
-    ].join("\n");
+  it("keeps every frame of a long message's stack, and the message under the cap", () => {
+    const err = new Error(`${"x".repeat(5000)}\nsecond line`);
     log.error("[api] failed", { error: err });
-    expect(logs.lines[0]!.errorAt).toBe("patients.ts:42>sync.ts:17>server.ts:191>a.ts:1>b.ts:2");
-    expect(JSON.stringify(logs.lines[0])).not.toMatch(/patient said|knee|hurts/);
+    const line = logs.lines[0]!;
+    expect(line.errorMessage).toBe("x".repeat(2000));
+    expect(line.truncatedFields).toBe(1);
+    expect(String(line.errorStack).split("\n").length).toBe(err.stack!.split("\n").length - 2);
+    expect(line.errorStack).toMatch(/^\s+at .*log\.test\.ts:\d+/);
   });
 
-  it("keeps a Postgres unique violation's table and constraint, never the row's values", () => {
+  it("keeps a Postgres unique violation's table, constraint, column and detail", () => {
     // pg's own error class, as Knex rethrows it with the statement in the message.
     const { DatabaseError } = require("pg") as typeof import("pg");
     const err = Object.assign(
@@ -115,6 +179,7 @@ describe("the field rule", () => {
         schema: "public",
         table: "users",
         constraint: "users_email_unique",
+        column: "email",
         detail: "Key (email)=(jane@example.com) already exists.",
       },
     );
@@ -122,18 +187,19 @@ describe("the field rule", () => {
     expect(logs.lines[0]).toMatchObject({
       errorName: "error",
       errorCode: "23505",
+      errorMessage: expect.stringContaining("duplicate key value violates unique constraint"),
       errorTable: "users",
       errorConstraint: "users_email_unique",
+      errorColumn: "email",
+      errorDetail: "Key (email)=(jane@example.com) already exists.",
     });
-    expect(logs.lines[0]!.errorAt).toEqual(expect.stringMatching(/^log\.test\.ts:\d+/));
-    expect(JSON.stringify(logs.lines[0])).not.toMatch(/jane|example|Key \(|duplicate/);
   });
 
-  it("lets a field fill a context key nobody set, never override one", () => {
-    withLogContext({ user: "user_A", org: null }, () => {
-      log.info("[cron] per clinic", { user: "user_B", org: "org_9" });
+  it("lets a field fill a context key nobody set with an id, never override one", () => {
+    withLogContext({ user: "user_A", org: null, role: null }, () => {
+      log.info("[cron] per clinic", { user: "user_B", org: "org_9", role: "the admin of the clinic" });
     });
-    expect(logs.lines[0]).toMatchObject({ user: "user_A", org: "org_9" });
+    expect(logs.lines[0]).toMatchObject({ user: "user_A", org: "org_9", role: null });
   });
 
   it("names the service as config reads RUN_SERVER: unset serves", () => {
@@ -495,7 +561,7 @@ describe("the job frame", () => {
     });
   });
 
-  it("finishes a run that throws at error level, with the error's shape and not its message", async () => {
+  it("finishes a run that throws at error level, with the error and its message", async () => {
     const entry = job("results:digest", async () => {
       throw Object.assign(new Error("connect to 10.0.0.7 refused"), {
         code: "ECONNREFUSED",
@@ -509,9 +575,9 @@ describe("the job frame", () => {
         outcome: "failed",
         errorName: "Error",
         errorCode: "ECONNREFUSED",
+        errorMessage: "connect to 10.0.0.7 refused",
       }),
     ]);
-    expect(JSON.stringify(logs.lines)).not.toContain("10.0.0.7");
   });
 
   it("gives a cron tick a scheduled frame that what it enqueues names as parent", async () => {

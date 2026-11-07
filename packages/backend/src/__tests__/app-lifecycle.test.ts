@@ -212,6 +212,10 @@ describe("application lifecycle", () => {
     const app = createApp({ models: [] });
     await app.start({ port: 4000 });
     expect(mocks.dbs).toHaveLength(pools);
+    // A failed query's logged message must not carry its bound values.
+    for (const [config] of mocks.knex.mock.calls as unknown as Array<[{ compileSqlOnError?: boolean }]>) {
+      expect(config.compileSqlOnError).toBe(false);
+    }
     for (const db of mocks.dbs) {
       expect(db.on.mock.calls.map(([event]: [string]) => event)).toEqual([
         "query",
