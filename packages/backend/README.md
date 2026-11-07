@@ -284,6 +284,13 @@ job("post:index", async ({ data, bullJob, attempt }) => {
 
 Jobs retry 3 times with exponential backoff (5s base).
 
+Every run writes `job started` and `job finished` (outcome, durationMs) in
+its own log frame. The outcome is `skipped` for a run that returns a truthy
+`skipped` (`{ skipped: true }` or a reason), `failed` (at error level) for
+one that throws, and
+`succeeded` otherwise; a run that did only part of its work calls
+`markJobOutcome("partial")` from `@parcae/backend/log`.
+
 ### Standalone enqueue
 
 You can enqueue jobs from anywhere — not just hook contexts:

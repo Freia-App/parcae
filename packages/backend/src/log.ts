@@ -63,6 +63,8 @@ export interface LogContext {
 type Frame = Partial<LogContext> & {
   requestUser?: { id: string; [key: string]: any } | null;
   refLoader?: unknown;
+  /** A job run's outcome holder, shared by every frame nested in the run. */
+  jobRun?: { outcome: JobOutcome };
 };
 
 export interface Line {
@@ -119,6 +121,22 @@ export function currentFrame(): Readonly<Frame> | undefined {
 export const currentLogContext: () =>
   | Readonly<Partial<LogContext>>
   | undefined = currentFrame;
+
+export type JobOutcome = "succeeded" | "partial" | "skipped" | "failed";
+
+/**
+ * The outcome the running job's `job finished` line reports, for a run that
+ * returns normally having done only part of its work, or none. Unmarked, a
+ * run that returns a truthy `skipped` skipped, any other return succeeded,
+ * and a throw failed. It lives in the log entry so a test that mocks
+ * `@parcae/backend` whole can call it.
+ */
+export function markJobOutcome(outcome: JobOutcome): void {
+  const run = currentFrame()?.jobRun;
+  if (run) {
+    run.outcome = outcome;
+  }
+}
 
 /** @internal Run `fn` in a frame built from the current one plus `patch`. */
 export function runInFrame<T>(patch: Frame, fn: () => T): T {

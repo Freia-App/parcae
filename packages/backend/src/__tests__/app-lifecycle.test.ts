@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => {
   let listenError: Error | null = null;
 
   const knex = vi.fn(() => {
-    const db = { destroy: vi.fn(async () => {}) };
+    const db = { destroy: vi.fn(async () => {}), on: vi.fn() };
     dbs.push(db);
     return db;
   });
@@ -202,6 +202,24 @@ describe("application lifecycle", () => {
     await expect(createApp({ models: [] }).start()).rejects.toThrow(
       "app startup is one-shot",
     );
+  });
+
+  it.each([
+    ["the shared pool", undefined, 1],
+    ["a read pool and the write pool", "postgres://replica.invalid/db", 2],
+  ])("observes %s once each", async (_name, readUrl, pools) => {
+    if (readUrl) vi.stubEnv("DATABASE_READ_URL", readUrl);
+    const app = createApp({ models: [] });
+    await app.start({ port: 4000 });
+    expect(mocks.dbs).toHaveLength(pools);
+    for (const db of mocks.dbs) {
+      expect(db.on.mock.calls.map(([event]: [string]) => event)).toEqual([
+        "query",
+        "query-response",
+        "query-error",
+      ]);
+    }
+    await app.stop();
   });
 
   it("passes stop({ drainTimeoutMs }) through to the queue drain", async () => {

@@ -204,8 +204,18 @@ export {
   currentLogContext,
   captureLogs,
   logHealth,
+  markJobOutcome,
 } from "./log";
-export type { Field, Fields, LogFields, LogContext, LogApp, LogTrigger, Line } from "./log";
+export type {
+  Field,
+  Fields,
+  JobOutcome,
+  LogFields,
+  LogContext,
+  LogApp,
+  LogTrigger,
+  Line,
+} from "./log";
 export { clientIp } from "./client-identity";
 export { unverifiedTokenClaims } from "./socket-diagnostics";
 

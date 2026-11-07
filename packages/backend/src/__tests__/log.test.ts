@@ -14,6 +14,7 @@ import {
   captureLogs,
   type Line,
   log,
+  markJobOutcome,
   runWithFrame,
   socketFrameOf,
   withLogContext,
@@ -425,6 +426,92 @@ describe("the job frame", () => {
     });
     expect(line!.operationId).toMatch(UUID);
     expect(line!.operationId).not.toBe(line!.parentId);
+  });
+
+  it("writes job started and job finished around every run, with the outcome it marked", async () => {
+    const entry = job("billing:reconcile", async () => {
+      log.info("[billing] reconciled");
+      markJobOutcome("partial");
+    });
+    await entry.handler({ data: {}, attempt: 2 });
+
+    const [started] = lines("job started");
+    const [finished] = lines("job finished");
+    expect(started).toMatchObject({
+      level: "info",
+      job: "billing:reconcile",
+      attempt: 2,
+    });
+    expect(finished).toMatchObject({
+      level: "info",
+      job: "billing:reconcile",
+      outcome: "partial",
+    });
+    expect(finished!.durationMs).toEqual(expect.any(Number));
+    expect(finished!.operationId).toBe(started!.operationId);
+    expect(lines("reconciled")[0]!.operationId).toBe(started!.operationId);
+  });
+
+  it("finishes an unmarked run as succeeded, or skipped when it returns { skipped: true }", async () => {
+    await job("oru:poll-inbound", async () => undefined).handler({ data: {} });
+    await job("post:index", async () => ({
+      skipped: true,
+      reason: "Not found",
+    })).handler({ data: {} });
+    await job("fax:poll-inbound", async () => ({
+      skipped: "no inbox configured",
+    })).handler({ data: {} });
+    expect(lines("job finished").map((l) => [l.job, l.outcome])).toEqual([
+      ["oru:poll-inbound", "succeeded"],
+      ["post:index", "skipped"],
+      ["fax:poll-inbound", "skipped"],
+    ]);
+  });
+
+  it("lands a mark from a nested frame on its run, and keeps an inline child run's mark its own", async () => {
+    const child = job("results:digest-one", async () => {
+      markJobOutcome("skipped");
+    });
+    await job("results:digest", async () => {
+      await withLogContext({ user: "user_2xyzABC" }, async () =>
+        markJobOutcome("partial"),
+      );
+      await child.handler({ data: {} });
+    }).handler({ data: {} });
+
+    expect(lines("job finished").map((l) => [l.job, l.outcome])).toEqual([
+      ["results:digest-one", "skipped"],
+      ["results:digest", "partial"],
+    ]);
+  });
+
+  it("writes a run marked failed at error level though it returned", async () => {
+    await job("oru:poll-inbound", async () => {
+      markJobOutcome("failed");
+    }).handler({ data: {} });
+    expect(lines("job finished")[0]).toMatchObject({
+      level: "error",
+      outcome: "failed",
+    });
+  });
+
+  it("finishes a run that throws at error level, with the error's shape and not its message", async () => {
+    const entry = job("results:digest", async () => {
+      throw Object.assign(new Error("connect to 10.0.0.7 refused"), {
+        code: "ECONNREFUSED",
+      });
+    });
+    await expect(entry.handler({ data: {} })).rejects.toThrow("refused");
+
+    expect(lines("job finished")).toEqual([
+      expect.objectContaining({
+        level: "error",
+        outcome: "failed",
+        errorName: "Error",
+        errorCode: "ECONNREFUSED",
+      }),
+    ]);
+    expect(JSON.stringify(logs.lines)).not.toContain("10.0.0.7");
   });
 
   it("gives a cron tick a scheduled frame that what it enqueues names as parent", async () => {

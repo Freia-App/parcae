@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import pako from 'pako';
 import { decompress } from 'compress-json';
+import { SESSION_BOUNDARY_CODES } from '@parcae/model';
 import { io as socketIo, type Socket } from 'socket.io-client';
 import { createApp } from '@parcae/backend';
 import type { AuthAdapter, AuthSession, ParcaeApp } from '@parcae/backend';
@@ -69,7 +70,7 @@ const reservePort = async (): Promise<number> => {
 interface RpcEnvelope {
   success: boolean;
   result: unknown;
-  error?: string;
+  error?: unknown;
   status?: number;
 }
 
@@ -148,7 +149,9 @@ describePostgres('socket session fence — app wiring', () => {
       const preHello = await callRpc(socket, '/v1/documents');
       expect(preHello.success).toBe(false);
       expect(preHello.status).toBe(409);
-      expect(preHello.error).toContain('not reconciled');
+      expect(preHello.error).toMatchObject({
+        code: SESSION_BOUNDARY_CODES.notReconciled,
+      });
 
       // Start a hello whose token resolution is latched open, then race
       // an RPC into the resolution window: the fence must refuse it
