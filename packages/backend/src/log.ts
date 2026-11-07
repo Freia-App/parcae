@@ -127,7 +127,7 @@ export type JobOutcome = "succeeded" | "partial" | "skipped" | "failed";
 /**
  * The outcome the running job's `job finished` line reports, for a run that
  * returns normally having done only part of its work, or none. Unmarked, a
- * run that returns `{ skipped: true }` skipped, any other return succeeded,
+ * run that returns a truthy `skipped` skipped, any other return succeeded,
  * and a throw failed. It lives in the log entry so a test that mocks
  * `@parcae/backend` whole can call it.
  */

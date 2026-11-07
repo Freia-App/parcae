@@ -140,8 +140,9 @@ function jobFrame(name: string, raw: unknown) {
 /**
  * `job started` and `job finished` around one run, inside its frame. The
  * outcome is what the handler marked (markJobOutcome); unmarked, a run that
- * returns `{ skipped: true }` skipped and any other return succeeded; a throw
- * failed. A failed outcome is written at error level.
+ * returns a truthy `skipped` (`{ skipped: true }` or a reason) skipped and any
+ * other return succeeded; a throw failed. A failed outcome is written at
+ * error level.
  */
 async function runLogged(
   run: { outcome: JobOutcome },
@@ -159,7 +160,7 @@ async function runLogged(
   }
   const outcome: JobOutcome = thrown
     ? "failed"
-    : run.outcome === "succeeded" && result?.skipped === true
+    : run.outcome === "succeeded" && result?.skipped
       ? "skipped"
       : run.outcome;
   log[outcome === "failed" ? "error" : "info"]("job finished", {

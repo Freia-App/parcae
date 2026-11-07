@@ -458,9 +458,13 @@ describe("the job frame", () => {
       skipped: true,
       reason: "Not found",
     })).handler({ data: {} });
+    await job("fax:poll-inbound", async () => ({
+      skipped: "no inbox configured",
+    })).handler({ data: {} });
     expect(lines("job finished").map((l) => [l.job, l.outcome])).toEqual([
       ["oru:poll-inbound", "succeeded"],
       ["post:index", "skipped"],
+      ["fax:poll-inbound", "skipped"],
     ]);
   });
 
