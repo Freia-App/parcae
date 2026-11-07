@@ -2,8 +2,9 @@
  * @parcae/backend — slow and failed query lines.
  *
  * A line for every query Knex sends that fails, and every one slower than
- * 500 ms, naming the table, method, duration and pool. Never the SQL or its
- * values: those can carry whatever a row holds. A pool that cannot hand out
+ * 500 ms, naming the table, method, duration and pool. A slow line never
+ * carries the SQL; a failed one carries the error, whose message Knex writes
+ * with the statement and whose detail can quote a row. A pool that cannot hand out
  * a connection fails before any query is sent, so it writes nothing here.
  */
 
