@@ -198,7 +198,14 @@ export {
 } from "./helpers";
 
 // Logger
-export { log } from "./logger";
+export {
+  log,
+  withLogContext,
+  captureLogs,
+  logHealth,
+} from "./log";
+export type { Field, Fields, LogFields, LogContext, LogApp, LogTrigger, Line } from "./log";
+export { clientIp } from "./client-identity";
 
 // Re-export model for convenience
 export { Model } from "@parcae/model";

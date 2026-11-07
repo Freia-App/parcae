@@ -46,6 +46,13 @@ export interface ParcaeProviderProps {
    * Pass a stable (module-level) reference: a fresh object per
    * render creates a fresh client.
    */
+  /**
+   * Who this client is, as `<app>/<version>/<platform>` (for example
+   * `dashboard/2026.11.07/web`). Sent as `client` in every hello, so the
+   * server's log names the app on a browser, which cannot set socket
+   * headers.
+   */
+  clientIdentity?: string;
   extraHeaders?: Record<string, string>;
   /**
    * Transport watchdog stale threshold in ms; `0` disables it.
@@ -213,6 +220,7 @@ const OwnedProvider: React.FC<Omit<ParcaeProviderProps, "client">> = ({
   version = "v1",
   transports,
   extraHeaders,
+  clientIdentity,
   watchdogStaleMs,
   ...props
 }) => {
@@ -232,11 +240,20 @@ const OwnedProvider: React.FC<Omit<ParcaeProviderProps, "client">> = ({
       getToken,
       transports,
       extraHeaders,
+      clientIdentity,
       watchdogStaleMs,
     });
     setClient(owned);
     return () => owned.dispose();
-  }, [url, version, auth, transports, extraHeaders, watchdogStaleMs]);
+  }, [
+    url,
+    version,
+    auth,
+    transports,
+    extraHeaders,
+    clientIdentity,
+    watchdogStaleMs,
+  ]);
 
   if (!client) return null;
   return <ClientProvider {...props} url={url} auth={auth} client={client} />;

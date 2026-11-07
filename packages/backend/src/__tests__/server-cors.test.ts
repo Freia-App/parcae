@@ -16,7 +16,7 @@ import {
   type TrustedOriginCheck,
 } from "../server";
 import { shutdownResources } from "../shutdown";
-import { log } from "../logger";
+import { log } from "../log";
 
 const STATIC = "https://app.example.com";
 const CLINIC = "https://portal.clinic.example";
@@ -175,7 +175,7 @@ describe("CORS origins", () => {
     // Browsers never send one, but a hand-crafted header can.
     await httpAllows(base, `${CLINIC}?token=secret`);
 
-    const line = logged.mock.calls.flat().map(String).join(" ");
+    const line = JSON.stringify(logged.mock.calls);
     expect(line).toContain(CLINIC);
     expect(line).not.toContain("secret");
   });

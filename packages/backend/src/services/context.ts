@@ -1,6 +1,5 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { Job } from "bullmq";
-import { log } from "../logger";
+import { currentFrame, log, runInFrame } from "../log";
 /**
  * @parcae/backend — Global service context
  *
@@ -42,14 +41,19 @@ interface RequestContext {
   refLoader?: RefLoader | null;
 }
 
-const _requestContext = new AsyncLocalStorage<RequestContext>();
+// The request context rides the log frame (`../log.ts`), one async store
+// for who is acting. Only this function sets `requestUser`, so a job's
+// frame, which names its parent's user for the log, never acts as them.
 
 /** Run a callback with request context (user) available to all downstream code. */
 export function runWithRequestContext<T>(
   ctx: RequestContext,
   fn: () => T,
 ): T {
-  return _requestContext.run(ctx, fn);
+  return runInFrame(
+    { requestUser: ctx.user, refLoader: ctx.refLoader ?? null },
+    fn,
+  );
 }
 
 /** Get the current request's user, if available. */
@@ -57,7 +61,7 @@ export function getRequestUser(): {
   id: string;
   [key: string]: any;
 } | null {
-  return _requestContext.getStore()?.user ?? null;
+  return currentFrame()?.requestUser ?? null;
 }
 
 /**
@@ -67,7 +71,7 @@ export function getRequestUser(): {
  * the loader exists for batching, not correctness.
  */
 export function getRefLoader(): RefLoader | null {
-  return _requestContext.getStore()?.refLoader ?? null;
+  return (currentFrame()?.refLoader as RefLoader | null | undefined) ?? null;
 }
 
 // ─── Global context (set by createApp at startup) ────────────────────────────
@@ -166,9 +170,9 @@ export async function enqueue(
   options: EnqueueOptions = {},
 ): Promise<Job | false | null> {
   if (!_queue) {
-    log.warn(
-      `[parcae] enqueue("${name}"): no queue configured (REDIS_URL not set)`,
-    );
+    log.warn("[parcae] enqueue: no queue configured (REDIS_URL not set)", {
+      job: name,
+    });
     return false;
   }
 
@@ -177,10 +181,11 @@ export async function enqueue(
   const queueName = _queue.queueNameFor(name);
   const queue = _queue.get(queueName);
   if (!queue) {
-    log.warn(`enqueue("${name}"): queue not available`);
+    log.warn("[parcae] enqueue: queue not available", { job: name });
     return false;
   }
 
+  data = stampJobContext(data);
   if (options.jobId) {
     return await addJobIfNotExists(queue, name, data, {
       jobId: options.jobId.replace(/:/g, "."),
@@ -193,6 +198,40 @@ export async function enqueue(
     removeOnComplete: options.removeOnComplete ?? 100,
     removeOnFail: options.removeOnFail ?? 50,
   });
+}
+
+/**
+ * The enqueuing frame, carried on the job's data as `_ctx` so the job's
+ * lines name the request (or cron, or job) that caused them. Ids only.
+ */
+export interface JobLogContext {
+  requestId: string | null;
+  operationId: string | null;
+  trigger: string | null;
+  user: string | null;
+  org: string | null;
+  app: string | null;
+}
+
+function stampJobContext(data: any): any {
+  const frame = currentFrame();
+  if (!frame || !data || typeof data !== "object" || Array.isArray(data)) {
+    return data;
+  }
+  const req = frame.req as any;
+  const sessionUser = req?.session?.user;
+  const pick = (...values: unknown[]) =>
+    (values.find((v) => typeof v === "string" && v) as string | undefined) ??
+    null;
+  const ctx: JobLogContext = {
+    requestId: frame.requestId ?? null,
+    operationId: frame.operationId ?? null,
+    trigger: frame.trigger ?? null,
+    user: pick(req?.userId, sessionUser?.id, frame.user),
+    org: pick(req?.orgId, sessionUser?.orgId, frame.org),
+    app: frame.app ?? null,
+  };
+  return { ...data, _ctx: ctx };
 }
 
 // ─── lock() ──────────────────────────────────────────────────────────────────

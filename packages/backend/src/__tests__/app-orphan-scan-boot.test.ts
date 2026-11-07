@@ -56,7 +56,6 @@ const mocks = vi.hoisted(() => {
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    success: vi.fn(),
     debug: vi.fn(),
   };
 
@@ -128,7 +127,6 @@ const mocks = vi.hoisted(() => {
       log.info.mockClear();
       log.warn.mockClear();
       log.error.mockClear();
-      log.success.mockClear();
       log.debug.mockClear();
     },
   };
@@ -147,7 +145,10 @@ vi.mock("../services/queue", async (importOriginal) => ({
   addJobIfNotExists: vi.fn(),
 }));
 vi.mock("../services/change-bus", () => ({ ChangeBus: mocks.ChangeBus }));
-vi.mock("../logger", () => ({ log: mocks.log }));
+vi.mock("../log", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../log")>()),
+  log: mocks.log,
+}));
 vi.mock("../server", () => ({
   createServer_: mocks.createServer_,
   listenServer: mocks.listenServer,

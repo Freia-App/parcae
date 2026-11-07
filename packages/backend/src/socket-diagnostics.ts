@@ -4,7 +4,7 @@
  *
  * The client's own account of the drop arrives in its hello and is
  * untrusted: only known keys survive, numbers are bounded, and strings are
- * cut short and quoted when logged.
+ * cut short.
  */
 
 type Field = string | number | boolean;
@@ -48,7 +48,8 @@ export function clientDiagnostics(raw: unknown): Record<string, Field> | null {
     const value = report[key];
     if (typeof value === "string" && value) out[key] = value.slice(0, max);
   };
-  text("disconnect", 40);
+  const disconnect = disconnectReason(report.disconnect);
+  if (disconnect) out.disconnect = disconnect;
   count("offlineMs");
   if (typeof report.hiddenAtDisconnect === "boolean") {
     out.hiddenAtDisconnect = report.hiddenAtDisconnect;
@@ -65,15 +66,40 @@ export function clientDiagnostics(raw: unknown): Record<string, Field> | null {
   return Object.keys(out).length > 0 ? out : null;
 }
 
-/** `key=value` pairs on one line; strings are JSON-quoted so no value can forge a field or a line. */
-export function logFields(
-  fields: Record<string, Field | null | undefined>,
-): string {
-  return Object.entries(fields)
-    .filter((entry): entry is [string, Field] => entry[1] != null)
-    .map(
-      ([key, value]) =>
-        `${key}=${typeof value === "string" ? JSON.stringify(value) : value}`,
-    )
-    .join(" ");
+/**
+ * socket.io's disconnect reason as a code ("transport close" becomes
+ * "transport-close"), so it survives the log's no-whitespace rule.
+ */
+export function disconnectReason(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const code = raw.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 40);
+  return /^[a-z-]+$/.test(code) ? code : undefined;
+}
+
+/**
+ * The `sub` and `exp` of a JWT, read without verifying it: who a token
+ * says it is, for naming the line when it is refused.
+ */
+export function unverifiedTokenClaims(token: string): {
+  sub?: string;
+  exp?: number;
+} {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"),
+    );
+    const sub = payload?.sub;
+    return {
+      sub:
+        typeof sub === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(sub)
+          ? sub
+          : undefined,
+      exp:
+        typeof payload?.exp === "number" && Number.isFinite(payload.exp)
+          ? payload.exp
+          : undefined,
+    };
+  } catch {
+    return {};
+  }
 }

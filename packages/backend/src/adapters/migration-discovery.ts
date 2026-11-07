@@ -17,7 +17,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { log } from "../logger";
+import { log } from "../log";
 import {
   _getInsertionOrdered,
   type MigrationEntry,
@@ -63,19 +63,15 @@ export async function discoverMigrations(
     try {
       await import(pathToFileURL(file).href);
     } catch (err) {
-      log.warn(
-        `[parcae/migration] failed to import ${file}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+      log.warn("[parcae/migration] failed to import", { file, error: err });
       continue;
     }
     const afterLen = raw.length;
 
     if (afterLen === beforeLen) {
       log.warn(
-        `[parcae/migration] ${file} did not register any migration — ` +
-          `did you forget to call migration()?`,
+        "[parcae/migration] file did not register any migration; did you forget to call migration()?",
+        { file },
       );
       continue;
     }

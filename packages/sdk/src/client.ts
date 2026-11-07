@@ -39,6 +39,13 @@ export interface ClientConfig {
    * and React Native; browsers ignore them for WebSocket transport.
    * Pass a stable reference when this config is created during render.
    */
+  /**
+   * Who this client is, as `<app>/<version>/<platform>` (for example
+   * `dashboard/2026.11.07/web`). Sent as `client` in every hello, so the
+   * server's log names the app on a browser, which cannot set socket
+   * headers.
+   */
+  clientIdentity?: string;
   extraHeaders?: Record<string, string>;
   /**
    * Dial the socket at construction (default `true`). Pass `false`
@@ -101,6 +108,7 @@ export function createClient(config: ClientConfig): ParcaeClient {
     getToken: config.getToken,
     transports: config.transports,
     extraHeaders: config.extraHeaders,
+    clientIdentity: config.clientIdentity,
     autoConnect: config.autoConnect,
     watchdogStaleMs: config.watchdogStaleMs,
   });

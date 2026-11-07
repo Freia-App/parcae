@@ -5,6 +5,7 @@
  * Both share the same route registry via Trouter.
  */
 
+import { AsyncResource } from "node:async_hooks";
 import { createServer } from "node:http";
 import { parse as parseUrl } from "node:url";
 import polka from "polka";
@@ -12,7 +13,9 @@ import { Server as SocketServer } from "socket.io";
 import bodyParser, { type OptionsJson } from "body-parser";
 import type { Config } from "./config";
 import { ClientError, error } from "./helpers";
-import { log } from "./logger";
+import { parseClientIdentity } from "./client-identity";
+import { currentFrame, log, newOperationId, runInFrame } from "./log";
+import { templatePath } from "./outbound";
 
 export interface ServerContext {
   polka: ReturnType<typeof polka>;
@@ -63,6 +66,83 @@ export const JSON_BODY_PARSER_OPTIONS: OptionsJson = {
   },
 };
 
+const HEALTH_PATH = /^\/v\d+\/health\/?$/;
+
+/**
+ * Open the request's log frame and write one `request responded` line when
+ * it ends. The frame holds the request itself: user, org and role are read
+ * from it as each line is written, after whatever auth ran. A socket call
+ * keeps its socket's app and links to its session as the parent; the IP
+ * goes only on connection and auth lines, never on a request's.
+ */
+function openRequestFrame(req: any, res: any, next: () => void): void {
+  const id = newOperationId();
+  const parent = currentFrame();
+  const client = parseClientIdentity(req.headers?.["x-freia-client"]);
+  runInFrame(
+    {
+      req,
+      requestId: id,
+      operationId: id,
+      parentId: req._socketRpc ? (parent?.operationId ?? null) : null,
+      trigger: "interactive",
+      job: null,
+      ip: null,
+      user: null,
+      org: null,
+      role: null,
+      ...(client
+        ? {
+            app: client.app,
+            appVersion: client.appVersion,
+            platform: client.platform,
+            appInferred: false,
+          }
+        : req._socketRpc
+          ? {}
+          : { app: null, appVersion: null, platform: null, appInferred: false }),
+    },
+    () => {
+      const path = String(req.url ?? "").split("?")[0] ?? "";
+      if (!HEALTH_PATH.test(path)) recordRequest(req, res, id, path);
+      next();
+    },
+  );
+}
+
+function recordRequest(req: any, res: any, id: string, path: string): void {
+  const started = performance.now();
+  res.setHeader?.("X-Freia-Operation-Id", id);
+  let recorded = false;
+  const record = (aborted: boolean) => {
+    if (recorded) return;
+    recorded = true;
+    const status = typeof res.statusCode === "number" ? res.statusCode : null;
+    const fields = {
+      route: templatePath(path),
+      method: req.method,
+      status,
+      durationMs: Math.round(performance.now() - started),
+      transport: req._socketRpc ? "socket" : "http",
+      ...(aborted ? { aborted: true } : {}),
+    };
+    if (status !== null && status >= 500) log.error("request responded", fields);
+    else log.info("request responded", fields);
+  };
+  // Socket calls answer on a fake response with no events, so the line is
+  // written from end(); a real response that closes first records too.
+  const end = res.end;
+  res.end = function (this: unknown, ...args: unknown[]) {
+    const result = end.apply(this, args);
+    record(false);
+    return result;
+  };
+  // The close event fires from the connection, outside the frame.
+  if (typeof res.once === "function") {
+    res.once("close", AsyncResource.bind(() => record(true)));
+  }
+}
+
 export function createServer_(options: ServerOptions): ServerContext {
   const { config } = options;
 
@@ -99,14 +179,24 @@ export function createServer_(options: ServerOptions): ServerContext {
           : status < 500
             ? "Bad request"
             : "An error occurred while processing your request";
-      log.error("[http] request failed:", req.method, req.url, err);
+      log.error("[http] request failed", {
+        method: req.method,
+        route: templatePath(String(req.url ?? "")),
+        status,
+        error: err,
+      });
       error(res, status, message);
     },
     onNoMatch: (req: any, res: any) => {
-      log.warn("[http] no route:", req.method, req.url);
+      log.warn("[http] no route", {
+        method: req.method,
+        route: templatePath(String(req.url ?? "")),
+      });
       error(res, 404, "Not found");
     },
   });
+  // First in the chain, so a body the parser refuses still has a frame.
+  app.use(openRequestFrame);
   app.use(bodyParser.json(JSON_BODY_PARSER_OPTIONS));
   app.use(bodyParser.urlencoded({ extended: true }));
 
@@ -136,7 +226,7 @@ export function createServer_(options: ServerOptions): ServerContext {
         );
         res.setHeader(
           "Access-Control-Allow-Headers",
-          "Content-Type, Authorization",
+          "Content-Type, Authorization, X-Freia-Client",
         );
         res.setHeader("Access-Control-Allow-Credentials", "true");
       }
@@ -233,11 +323,10 @@ export function createOriginPolicy(
       try {
         return (await isTrustedOrigin(origin)) === true;
       } catch (err) {
-        log.error(
-          "[cors] isTrustedOrigin failed, denying origin:",
-          stripQuery(origin),
-          err,
-        );
+        log.error("[cors] isTrustedOrigin failed, denying origin", {
+          origin: stripQuery(origin),
+          error: err,
+        });
         return false;
       }
     })();

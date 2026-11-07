@@ -1,4 +1,4 @@
-import { log } from "../logger";
+import { log } from "../log";
 import { detectEngine } from "./engine";
 import { loadCachedSchemas } from "../schema/generate";
 
@@ -568,7 +568,7 @@ export class BackendAdapter implements ModelAdapter {
    */
   async detectEngine(): Promise<"alloydb" | "postgres"> {
     this.engine = await detectEngine(this.write);
-    log.info(`Database engine detected: ${this.engine}`);
+    log.info("Database engine detected", { engine: this.engine });
     return this.engine;
   }
 
@@ -771,7 +771,7 @@ export class BackendAdapter implements ModelAdapter {
       cleanups,
       `${ModelClass.type}:${action}`,
     );
-    log.debug(`model saved model=${ModelClass.type}, id=${model.id}`);
+    log.debug("model saved", { model: ModelClass.type, id: model.id });
     return persistedData;
   }
 
@@ -2303,13 +2303,15 @@ export class BackendAdapter implements ModelAdapter {
       const onError = (fn: () => Promise<void> | void) => {
         if (isAsync) {
           log.warn(
-            `[hook] ctx.onError() called inside async hook for ${hookEntry.modelType}:${action} — ignored (async hooks run outside the caller's error path)`,
+            "[hook] ctx.onError() called inside async hook, ignored (async hooks run outside the caller's error path)",
+            { model: hookEntry.modelType, action },
           );
           return;
         }
         if (!extra?.cleanups) {
           log.warn(
-            `[hook] ctx.onError() called outside a tracked operation for ${hookEntry.modelType}:${action} — ignored`,
+            "[hook] ctx.onError() called outside a tracked operation, ignored",
+            { model: hookEntry.modelType, action },
           );
           return;
         }
@@ -2331,10 +2333,11 @@ export class BackendAdapter implements ModelAdapter {
           void Promise.resolve()
             .then(() => hookEntry.handler(ctx))
             .catch((err) => {
-              log.error(
-                `[hook] Async error in ${hookEntry.modelType}:${action}:`,
-                err,
-              );
+              log.error("[hook] Async error", {
+                model: hookEntry.modelType,
+                action,
+                error: err,
+              });
             });
         };
         if (!runAfterCommitIfActive(dispatch)) dispatch();
@@ -2357,7 +2360,10 @@ export class BackendAdapter implements ModelAdapter {
       try {
         await cleanups[i]!();
       } catch (cleanupErr) {
-        log.error(`[parcae/onError] cleanup failed for ${label}:`, cleanupErr);
+        log.error("[parcae/onError] cleanup failed", {
+          cleanup: label,
+          error: cleanupErr,
+        });
       }
     }
   }
@@ -2519,9 +2525,9 @@ export class BackendAdapter implements ModelAdapter {
     } = {},
   ): Promise<void> {
     if (modelClass.managed === false) {
-      log.info(
-        `skipping schema — model=${modelClass.type} (externally managed)`,
-      );
+      log.info("skipping schema (externally managed)", {
+        model: modelClass.type,
+      });
       return;
     }
 
@@ -2534,7 +2540,7 @@ export class BackendAdapter implements ModelAdapter {
     const indexes = modelClass.indexes ?? [];
     const intro = opts.introspection;
 
-    log.info(`ensuring schema — model=${modelClass.type}`);
+    log.info("ensuring schema", { model: modelClass.type });
 
     // `hasTable` and column/index existence: answered from the cache
     // when ensureAllTables built one, otherwise per-call (preserves
@@ -2590,12 +2596,15 @@ export class BackendAdapter implements ModelAdapter {
       obsoleteColumns = existingColumns.filter((c) => !owned.has(c));
       if (obsoleteColumns.length > 0) {
         if (shouldDropObsolete) {
-          log.info(
-            `dropping ${obsoleteColumns.length} obsolete column(s) — table=${table} columns=[${obsoleteColumns.join(", ")}]`,
-          );
+          log.info("dropping obsolete columns", {
+            table,
+            count: obsoleteColumns.length,
+            columns: obsoleteColumns.join(","),
+          });
         } else {
           log.info(
-            `obsolete column(s) detected — table=${table} columns=[${obsoleteColumns.join(", ")}] (set PARCAE_DROP_OBSOLETE_COLUMNS=true to remove)`,
+            "obsolete columns detected (set PARCAE_DROP_OBSOLETE_COLUMNS=true to remove)",
+            { table, count: obsoleteColumns.length, columns: obsoleteColumns.join(",") },
           );
         }
       }
@@ -2679,7 +2688,7 @@ export class BackendAdapter implements ModelAdapter {
       },
     );
 
-    log.info(`ensured schema — model=${modelClass.type}`);
+    log.info("ensured schema", { model: modelClass.type });
 
     // ── Search schema (tsvector + trigram + optional vector) ──────────
     const searchFields = modelClass.searchFields as
@@ -2720,7 +2729,7 @@ export class BackendAdapter implements ModelAdapter {
       `,
         [table],
       );
-      log.info(`search: added _search tsvector column — table=${table}`);
+      log.info("search: added _search tsvector column", { table });
     }
 
     // GIN index on _search
@@ -2758,9 +2767,7 @@ export class BackendAdapter implements ModelAdapter {
           "ALTER TABLE ?? ADD COLUMN _embedding vector(768)",
           [table],
         );
-        log.info(
-          `search: added _embedding vector(768) column — table=${table}`,
-        );
+        log.info("search: added _embedding vector(768) column", { table });
       }
 
       const embIdxName = `${table}__embedding_scann`;
@@ -2779,9 +2786,11 @@ export class BackendAdapter implements ModelAdapter {
       this._embeddingReady.add(table);
     }
 
-    log.info(
-      `search: indexes ensured — table=${table} fields=[${fields.join(", ")}] engine=${this.engine}`,
-    );
+    log.info("search: indexes ensured", {
+      table,
+      fields: fields.join(","),
+      engine: this.engine,
+    });
   }
 
   async ensureAllTables(models: ModelConstructor[]): Promise<void> {
@@ -2850,9 +2859,11 @@ export class BackendAdapter implements ModelAdapter {
             [table, text, model.id],
           );
         } catch (err: any) {
-          log.warn(
-            `search: embedding generation failed — model=${modelClass.type} id=${ctx.model?.id}: ${err.message}`,
-          );
+          log.warn("search: embedding generation failed", {
+            model: modelClass.type,
+            id: ctx.model?.id,
+            error: err,
+          });
         }
       };
 
@@ -2867,7 +2878,7 @@ export class BackendAdapter implements ModelAdapter {
         priority: 999,
       });
 
-      log.info(`search: registered embedding hook — model=${modelClass.type}`);
+      log.info("search: registered embedding hook", { model: modelClass.type });
     }
   }
 }

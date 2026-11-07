@@ -332,3 +332,25 @@ describe("SocketTransport — why the last connection lapsed", () => {
     transport.dispose();
   });
 });
+
+describe("SocketTransport — client identity", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("names the client in the hello, so the server's log can say which app dropped", async () => {
+    new SocketTransport({
+      url: "http://localhost:0",
+      getToken: async () => "t1",
+      clientIdentity: "portal/2026.11.07/web",
+    });
+    currentSocket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(emitsOf("hello").map((e) => e.args[0])).toEqual([
+      { token: "t1", client: "portal/2026.11.07/web" },
+    ]);
+  });
+});

@@ -7,7 +7,7 @@
  *   - the SessionMachine (who is the user?)
  *
  * Wire protocol:
- *   client → server:  "hello" + { token } → ack({ userId })
+ *   client → server:  "hello" + { token, diag?, client? } → ack({ userId })
  *   client → server:  "call" (RPC, unchanged)
  *   client → server:  "resync" + { queries: [...] } → ack(results)
  *   server → client:  "query:<hash>" ops streams (unchanged)
@@ -120,6 +120,13 @@ export interface SocketTransportConfig {
    * spreads handshake headers onto every synthetic request, so a
    * header set here reaches middleware like any per-request header.
    */
+  /**
+   * Who this client is, as `<app>/<version>/<platform>` (for example
+   * `dashboard/2026.11.07/web`). Sent as `client` in every hello, so the
+   * server's log names the app on a browser, which cannot set socket
+   * headers.
+   */
+  clientIdentity?: string;
   extraHeaders?: Record<string, string>;
   /** Maximum time to wait for a hello acknowledgement. */
   handshakeTimeout?: number;
@@ -202,6 +209,7 @@ export class SocketTransport extends EventEmitter implements Transport {
   private url: string;
   private version: string;
   private getToken: (options?: TokenRequest) => Promise<string | null>;
+  private readonly clientIdentity: string | undefined;
   private inflight = new Map<string, Promise<any>>();
   private pendingCalls = new Map<string, PendingCall>();
   /**
@@ -283,6 +291,7 @@ export class SocketTransport extends EventEmitter implements Transport {
     this.url = config.url;
     this.version = config.version ?? "v1";
     this.getToken = config.getToken;
+    this.clientIdentity = config.clientIdentity;
     this.handshakeTimeout = config.handshakeTimeout ?? DEFAULT_TIMEOUT;
     this.watchdogStaleMs = config.watchdogStaleMs ?? WATCHDOG_STALE_MS;
 
@@ -621,7 +630,11 @@ export class SocketTransport extends EventEmitter implements Transport {
 
         const t0 = performance.now();
         const diag = this._reconnectDiagnostics();
-        const payload = diag ? { token, diag } : { token };
+        const payload = {
+          token,
+          ...(diag ? { diag } : {}),
+          ...(this.clientIdentity ? { client: this.clientIdentity } : {}),
+        };
         this.socket.emit("hello", payload, (response: any) => {
           const current = this.activeHandshake;
           if (!current || current.generation !== generation) return;
@@ -1029,7 +1042,10 @@ export class SocketTransport extends EventEmitter implements Transport {
           fail(new Error("Session termination timeout"));
         }, this.handshakeTimeout);
         release = this._trackWaiter(fail, () => clearTimeout(timeout));
-        this.socket.emit("hello", { token: null }, (response: any) => {
+        const anonymous = this.clientIdentity
+          ? { token: null, client: this.clientIdentity }
+          : { token: null };
+        this.socket.emit("hello", anonymous, (response: any) => {
           if (settled) return;
           settled = true;
           release();

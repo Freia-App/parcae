@@ -14,7 +14,7 @@ import { Redlock } from "@sesamecare-oss/redlock";
 // `import_events.EventEmitter` namespace reference at runtime in some
 // consumer setups.
 import EventEmitter from "eventemitter3";
-import { log } from "../logger";
+import { log } from "../log";
 
 // Namespaced Redis channel so multiple apps sharing one Redis
 // instance don't cross-contaminate each other's pub/sub traffic.
@@ -45,7 +45,7 @@ export class PubSub {
     const isTLS = url.startsWith("rediss://");
     const opts = isTLS ? { tls: { rejectUnauthorized: false } } : {};
 
-    log.info(`PubSub connecting to Redis (TLS=${isTLS})...`);
+    log.info("PubSub connecting to Redis", { tls: isTLS });
     const t0 = Date.now();
 
     this.redisLock = new Client(url, opts);
@@ -58,13 +58,19 @@ export class PubSub {
       ["write", this.redisWrite],
     ] as const) {
       (client as Client).on("connect", () =>
-        log.info(`PubSub redis:${name} connected (${Date.now() - t0}ms)`),
+        log.info("PubSub redis connected", {
+          client: name,
+          durationMs: Date.now() - t0,
+        }),
       );
       (client as Client).on("error", (err) =>
-        log.warn(`PubSub redis:${name} error: ${err.message}`),
+        log.warn("PubSub redis error", { client: name, error: err }),
       );
       (client as Client).on("ready", () =>
-        log.info(`PubSub redis:${name} ready (${Date.now() - t0}ms)`),
+        log.info("PubSub redis ready", {
+          client: name,
+          durationMs: Date.now() - t0,
+        }),
       );
     }
 
@@ -77,7 +83,7 @@ export class PubSub {
 
     log.info("PubSub subscribing to events channel...");
     await this.redisRead.subscribe(REDIS_CHANNEL);
-    log.info(`PubSub subscribed (${Date.now() - t0}ms)`);
+    log.info("PubSub subscribed", { durationMs: Date.now() - t0 });
 
     this.redisRead.on("message", (_channel: string, message: string) => {
       try {
@@ -94,7 +100,7 @@ export class PubSub {
       void this.redisWrite
         .publish(REDIS_CHANNEL, JSON.stringify([event, ...args]))
         .catch((err) => {
-          log.error(`PubSub publish failed for "${event}":`, err);
+          log.error("PubSub publish failed", { event, error: err });
         });
     } else {
       // In-process fallback

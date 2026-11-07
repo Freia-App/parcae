@@ -36,7 +36,7 @@
 import type { Server as SocketServer } from "socket.io";
 import type { Knex } from "knex";
 import type { AuthAdapter } from "./auth";
-import { log } from "./logger";
+import { log } from "./log";
 import type { ChangeBus } from "./services/change-bus";
 import type { PubSub } from "./services/pubsub";
 import type { QueueService } from "./services/queue";
@@ -88,7 +88,7 @@ async function safe(label: string, fn: () => Promise<void> | void): Promise<void
   try {
     await fn();
   } catch (err) {
-    log.warn(`shutdown: ${label} threw — ${String(err)}`);
+    log.warn("shutdown: step threw", { step: label, error: err });
   }
 }
 
@@ -147,10 +147,10 @@ export async function shutdownResources(r: ShutdownResources): Promise<void> {
       ]);
       if (timer) clearTimeout(timer);
       if (outcome === "timeout") {
-        log.warn(`shutdown: queue drain timed out after ${timeoutMs}ms`);
+        log.warn("shutdown: queue drain timed out", { timeoutMs });
         await safe("queue.forceClose", () => r.queue!.forceClose());
       } else if (typeof outcome === "object") {
-        log.warn(`shutdown: queue.close threw — ${String(outcome.error)}`);
+        log.warn("shutdown: queue.close threw", { error: outcome.error });
       }
     }
   }

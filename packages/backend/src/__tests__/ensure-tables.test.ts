@@ -18,9 +18,9 @@ import {
   beforeEach,
   expect,
   it,
-  vi,
 } from "vitest";
 import { BackendAdapter } from "../adapters/model";
+import { captureLogs } from "../log";
 import {
   createPostgresTestDatabase,
   describePostgres,
@@ -215,24 +215,20 @@ describePostgres("BackendAdapter.ensureAllTables — obsolete columns", () => {
     });
 
     const adapter = await makeAdapter(db);
-    const logSpy = vi.spyOn(
-      // The adapter uses the same `log` module exported from `../logger`.
-      // Spying on console.info is sufficient because the logger writes there.
-      console,
-      "log",
-    );
+    const logs = captureLogs();
 
     await adapter.ensureAllTables([
       makeModel("post", {}),
     ]);
+    logs.stop();
 
-    const allOutput = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-    expect(allOutput).toMatch(/legacy_one/);
-    expect(allOutput).toMatch(/legacy_two/);
+    const [line] = logs.lines.filter((l) => l.table === "posts" && l.columns);
+    expect(String(line!.columns).split(",")).toEqual(
+      expect.arrayContaining(["legacy_one", "legacy_two"]),
+    );
     // Operators should be pointed at the flag they can use.
-    expect(allOutput).toMatch(/PARCAE_DROP_OBSOLETE_COLUMNS/);
-
-    logSpy.mockRestore();
+    expect(line!.msg).toMatch(/PARCAE_DROP_OBSOLETE_COLUMNS/);
+    expect(line!.level).toBe("info");
   });
 
   it("drops obsolete columns when PARCAE_DROP_OBSOLETE_COLUMNS=true", async () => {

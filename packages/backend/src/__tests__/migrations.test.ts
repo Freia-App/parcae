@@ -15,6 +15,7 @@ import {
 } from "../adapters/migrations";
 import * as metaModule from "../adapters/migration-meta";
 import { ensureMetaTable } from "../adapters/migration-meta";
+import { captureLogs } from "../log";
 import { BackendAdapter } from "../adapters/model";
 import {
   clearMigrations,
@@ -481,32 +482,34 @@ describe("writeMetaRowWithRetry (non-tx meta atomicity)", () => {
   });
 
   it("retries once on failure, succeeds on retry, and warns", async () => {
-    const warn = vi.spyOn(console, "log").mockImplementation(() => {});
+    const logs = captureLogs();
     const writer = vi
       .fn()
       .mockRejectedValueOnce(new Error("transient"))
       .mockResolvedValueOnce(undefined);
 
     await writeMetaRowWithRetry({} as Knex, row, writer);
+    logs.stop();
 
     expect(writer).toHaveBeenCalledTimes(2);
-    const warnCalls = warn.mock.calls.flat().join(" ");
-    expect(warnCalls).toMatch(/retrying/);
+    expect(logs.lines.map((l) => [l.level, l.migration])).toEqual([
+      ["warn", row.name],
+    ]);
+    expect(logs.lines[0]!.msg).toMatch(/retrying/);
   });
 
   it("rethrows on second failure and logs error with manual-recovery hint", async () => {
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    const errorLog = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
+    const logs = captureLogs();
     const writer = vi.fn().mockRejectedValue(new Error("persistent failure"));
 
     await expect(
       writeMetaRowWithRetry({} as Knex, row, writer),
     ).rejects.toThrow(/persistent failure/);
+    logs.stop();
     expect(writer).toHaveBeenCalledTimes(2);
-    const errCalls = errorLog.mock.calls.flat().join(" ");
-    expect(errCalls).toMatch(/Manual recovery/);
+    const errors = logs.lines.filter((l) => l.level === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.msg).toMatch(/Manual recovery/);
   });
 });
 

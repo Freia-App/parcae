@@ -18,7 +18,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Knex } from "knex";
-import { log } from "../logger";
+import { log } from "../log";
 import type { MigrationEntry } from "../routing/migration";
 
 export const META_TABLE = "parcae_migration_meta";
@@ -220,9 +220,12 @@ export function verifyChecksums(
 
     const actual = sha256File(entry.path);
     if (actual && actual !== recorded.checksum) {
-      log.error(
-        `[parcae] migration checksum mismatch name="${entry.name}" path="${entry.path}" expected=${recorded.checksum} actual=${actual}`,
-      );
+      log.error("[parcae] migration checksum mismatch", {
+        migration: entry.name,
+        path: entry.path,
+        expected: recorded.checksum,
+        actual,
+      });
       drifted.push({
         name: entry.name,
         path: entry.path,
@@ -238,10 +241,11 @@ export function verifyChecksums(
     // Audit-log every bypassed drift so operators leave a trail instead of
     // silently ignoring checksum mismatches.
     for (const d of drifted) {
-      log.warn(
-        `[parcae] checksum drift bypassed for "${d.name}" — ` +
-          `expected ${d.expected.slice(0, 12)}…, actual ${d.actual.slice(0, 12)}…`,
-      );
+      log.warn("[parcae] checksum drift bypassed", {
+        migration: d.name,
+        expected: d.expected.slice(0, 12),
+        actual: d.actual.slice(0, 12),
+      });
     }
     return;
   }
@@ -339,9 +343,7 @@ export function classifyStatement(sql: string): StatementKind {
   if (WRITE_PREFIX.test(sql)) return "write";
   if (READ_PREFIX.test(sql)) return "read";
   // Unknown statement — default to "write" so we don't hide effects.
-  log.debug(
-    `[parcae] unknown statement kind, counting as write: ${sql.slice(0, 120)}`,
-  );
+  log.debug("[parcae] unknown statement kind, counting as write");
   return "write";
 }
 
