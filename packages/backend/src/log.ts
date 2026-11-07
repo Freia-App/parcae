@@ -17,7 +17,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { parseBoolString } from "./config";
+import { parseBoolString } from "./bool-string";
 
 export { clientIp } from "./client-identity";
 
