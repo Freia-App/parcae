@@ -452,9 +452,26 @@ describe("the job frame", () => {
     expect(lines("reconciled")[0]!.operationId).toBe(started!.operationId);
   });
 
-  it("finishes a run that returns without a mark as succeeded", async () => {
+  it("finishes an unmarked run as succeeded, or skipped when it returns { skipped: true }", async () => {
     await job("oru:poll-inbound", async () => undefined).handler({ data: {} });
-    expect(lines("job finished")[0]).toMatchObject({ outcome: "succeeded" });
+    await job("post:index", async () => ({
+      skipped: true,
+      reason: "Not found",
+    })).handler({ data: {} });
+    expect(lines("job finished").map((l) => [l.job, l.outcome])).toEqual([
+      ["oru:poll-inbound", "succeeded"],
+      ["post:index", "skipped"],
+    ]);
+  });
+
+  it("writes a run marked failed at error level though it returned", async () => {
+    await job("oru:poll-inbound", async () => {
+      markJobOutcome("failed");
+    }).handler({ data: {} });
+    expect(lines("job finished")[0]).toMatchObject({
+      level: "error",
+      outcome: "failed",
+    });
   });
 
   it("finishes a run that throws at error level, with the error's shape and not its message", async () => {

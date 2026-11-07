@@ -130,9 +130,10 @@ const jobOutcomes = (shared[OUTCOMES_KEY] ??= new Map<string, JobOutcome>());
 
 /**
  * The outcome the running job's `job finished` line reports, for a run that
- * returns normally having done only part of its work, or none. A run that
- * returns without calling this succeeded; one that throws failed. It lives
- * in the log entry so a test that mocks `@parcae/backend` whole can call it.
+ * returns normally having done only part of its work, or none. Unmarked, a
+ * run that returns `{ skipped: true }` skipped, any other return succeeded,
+ * and a throw failed. It lives in the log entry so a test that mocks
+ * `@parcae/backend` whole can call it.
  */
 export function markJobOutcome(outcome: JobOutcome): void {
   const operationId = currentFrame()?.operationId;

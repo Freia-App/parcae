@@ -204,6 +204,32 @@ describe("application lifecycle", () => {
     );
   });
 
+  const poolEvents = (db: any) =>
+    db.on.mock.calls.map(([event]: [string]) => event);
+
+  it("observes the shared pool's queries once", async () => {
+    const app = createApp({ models: [] });
+    await app.start({ port: 4000 });
+    expect(mocks.dbs).toHaveLength(1);
+    expect(poolEvents(mocks.dbs[0])).toEqual([
+      "query",
+      "query-response",
+      "query-error",
+    ]);
+    await app.stop();
+  });
+
+  it("observes a read pool and the write pool once each", async () => {
+    vi.stubEnv("DATABASE_READ_URL", "postgres://replica.invalid/db");
+    const app = createApp({ models: [] });
+    await app.start({ port: 4000 });
+    expect(mocks.dbs).toHaveLength(2);
+    for (const db of mocks.dbs) {
+      expect(poolEvents(db)).toEqual(["query", "query-response", "query-error"]);
+    }
+    await app.stop();
+  });
+
   it("passes stop({ drainTimeoutMs }) through to the queue drain", async () => {
     const app = createApp({ models: [] });
     await app.start({ port: 4000 });
