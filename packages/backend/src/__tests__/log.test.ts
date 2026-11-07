@@ -81,6 +81,53 @@ describe("the field rule", () => {
     expect(b).toMatchObject({ errorName: "Error", errorCode: "23505" });
   });
 
+  it("says where an error was thrown, in app code only, and never what it said", () => {
+    const err = new Error("patient said\n    at their knee (hurts.ts:1:1)");
+    err.stack = [
+      "Error: patient said",
+      "    at their knee (hurts.ts:1:1)",
+      "    at Object.handler (/srv/app/controllers/patients.ts:42:11)",
+      "    at node:internal/process/task_queues:95:5",
+      "    at run (/srv/app/node_modules/knex/lib/runner.js:140:9)",
+      "    at async file:///srv/app/services/sync.ts:17:3",
+      "    at Polka.handler (/srv/app/server.ts:191:20)",
+      "    at a (/srv/app/a.ts:1:1)",
+      "    at b (/srv/app/b.ts:2:2)",
+      "    at c (/srv/app/c.ts:3:3)",
+    ].join("\n");
+    log.error("[api] failed", { error: err });
+    expect(logs.lines[0]!.errorAt).toBe("patients.ts:42>sync.ts:17>server.ts:191>a.ts:1>b.ts:2");
+    expect(JSON.stringify(logs.lines[0])).not.toMatch(/patient said|knee|hurts/);
+  });
+
+  it("keeps a Postgres unique violation's table and constraint, never the row's values", () => {
+    // pg's own error class, as Knex rethrows it with the statement in the message.
+    const { DatabaseError } = require("pg") as typeof import("pg");
+    const err = Object.assign(
+      new DatabaseError(
+        'insert into "users" ("email") values ($1) - duplicate key value violates unique constraint "users_email_unique"',
+        180,
+        "error",
+      ),
+      {
+        code: "23505",
+        schema: "public",
+        table: "users",
+        constraint: "users_email_unique",
+        detail: "Key (email)=(jane@example.com) already exists.",
+      },
+    );
+    log.error("[db] query failed", { table: "users", error: err });
+    expect(logs.lines[0]).toMatchObject({
+      errorName: "error",
+      errorCode: "23505",
+      errorTable: "users",
+      errorConstraint: "users_email_unique",
+    });
+    expect(logs.lines[0]!.errorAt).toEqual(expect.stringMatching(/^log\.test\.ts:\d+/));
+    expect(JSON.stringify(logs.lines[0])).not.toMatch(/jane|example|Key \(|duplicate/);
+  });
+
   it("lets a field fill a context key nobody set, never override one", () => {
     withLogContext({ user: "user_A", org: null }, () => {
       log.info("[cron] per clinic", { user: "user_B", org: "org_9" });

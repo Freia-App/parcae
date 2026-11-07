@@ -10,7 +10,9 @@
  * `@`, `%` or `+`, or over 80 characters is dropped and counted, as are
  * dates, arrays and objects, so
  * clinical text (notes, names, results, model output) cannot reach a log
- * line through a field. An Error keeps its name, code and status only.
+ * line through a field. An Error keeps its name, code, status, a Postgres
+ * error's table, constraint and column, and where it was thrown (`<key>At`,
+ * file:line frames in app code); never its message.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -257,6 +259,31 @@ function keepString(value: string): boolean {
 
 type Scalar = string | number | boolean | null;
 
+const CODE_FILE = /^[A-Za-z0-9_.-]{1,60}\.(?:[cm]?[jt]sx?)$/;
+
+/**
+ * Where an error was thrown, never what it said: the top five frames in app
+ * code as `file.ts:line` joined by `>`, skipping Node internals and
+ * node_modules. The stack's first lines repeat the message, so they are
+ * skipped before any frame is read.
+ */
+function stackAt(err: Error): string | null {
+  if (typeof err.stack !== "string") return null;
+  const messageLines = String(err.message).split("\n").length;
+  const frames: string[] = [];
+  for (const line of err.stack.split("\n").slice(messageLines)) {
+    const frame = /^\s+at (?:.*?\()?(.+?):(\d+):\d+\)?$/.exec(line);
+    if (!frame) continue;
+    const path = frame[1]!;
+    if (path.startsWith("node:") || path.includes("node_modules")) continue;
+    const file = path.split(/[\\/]/).pop()!;
+    if (!CODE_FILE.test(file)) continue;
+    frames.push(`${file}:${frame[2]}`);
+    if (frames.length === 5) break;
+  }
+  return frames.length ? frames.join(">").slice(0, 200) : null;
+}
+
 /**
  * Project one caller value onto the line. Returns the entries to write and
  * how many values were dropped.
@@ -277,11 +304,18 @@ function project(key: string, value: unknown): [Array<[string, Scalar]>, number]
       code?: unknown;
       status?: unknown;
       statusCode?: unknown;
+      table?: unknown;
+      constraint?: unknown;
+      column?: unknown;
     };
+    // A Postgres error's schema names; its detail quotes row values and stays out.
     const parts: Array<[string, unknown]> = [
       [`${key}Name`, err.name],
       [`${key}Code`, err.code],
       [`${key}Status`, err.status ?? err.statusCode],
+      [`${key}Table`, err.table],
+      [`${key}Constraint`, err.constraint],
+      [`${key}Column`, err.column],
     ];
     for (const [k, v] of parts) {
       if (typeof v === "string") {
@@ -291,6 +325,8 @@ function project(key: string, value: unknown): [Array<[string, Scalar]>, number]
         out.push([k, v]);
       }
     }
+    const at = stackAt(err);
+    if (at) out.push([`${key}At`, at]);
     return [out, dropped];
   }
   return [[], 1];
