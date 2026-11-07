@@ -783,9 +783,10 @@ export class SocketTransport extends EventEmitter implements Transport {
           });
         },
         (err) => {
+          // The error's name, not its text: the server logs codes only.
           note(
             "token-error",
-            (err instanceof Error ? err.message : String(err)).slice(0, 120),
+            (err instanceof Error ? err.name : typeof err).slice(0, 60),
           );
           retry();
         },

@@ -14,7 +14,13 @@ import bodyParser, { type OptionsJson } from "body-parser";
 import type { Config } from "./config";
 import { ClientError, error } from "./helpers";
 import { parseClientIdentity } from "./client-identity";
-import { currentFrame, log, newOperationId, runInFrame } from "./log";
+import {
+  BLANK_CONTEXT,
+  currentFrame,
+  log,
+  newOperationId,
+  runInFrame,
+} from "./log";
 import { templatePath } from "./outbound";
 
 export interface ServerContext {
@@ -81,29 +87,24 @@ function openRequestFrame(req: any, res: any, next: () => void): void {
   const client = parseClientIdentity(req.headers?.["x-freia-client"]);
   runInFrame(
     {
+      ...BLANK_CONTEXT,
+      // A socket call without its own header keeps its socket's app.
+      ...(req._socketRpc
+        ? {
+            app: parent?.app ?? null,
+            appVersion: parent?.appVersion ?? null,
+            platform: parent?.platform ?? null,
+          }
+        : {}),
+      ...client,
       req,
       requestId: id,
       operationId: id,
       parentId: req._socketRpc ? (parent?.operationId ?? null) : null,
       trigger: "interactive",
-      job: null,
-      ip: null,
-      user: null,
-      org: null,
-      role: null,
-      ...(client
-        ? {
-            app: client.app,
-            appVersion: client.appVersion,
-            platform: client.platform,
-            appInferred: false,
-          }
-        : req._socketRpc
-          ? {}
-          : { app: null, appVersion: null, platform: null, appInferred: false }),
     },
     () => {
-      const path = String(req.url ?? "").split("?")[0] ?? "";
+      const path = req.path ?? String(req.url ?? "").split("?")[0] ?? "";
       // Preflights and health checks carry no one's request.
       if (req.method !== "OPTIONS" && !HEALTH_PATH.test(path)) {
         recordRequest(req, res, id, path);
@@ -189,7 +190,7 @@ export function createServer_(options: ServerOptions): ServerContext {
             : "An error occurred while processing your request";
       log.error("[http] request failed", {
         method: req.method,
-        route: templatePath(String(req.url ?? "")),
+        route: req._parcaeRoute ?? templatePath(String(req.url ?? "")),
         status,
         error: err,
       });

@@ -44,8 +44,10 @@ import {
 import type { ModelConstructor, SchemaDefinition } from "@parcae/model";
 import { clientIp, parseClientIdentity } from "./client-identity";
 import {
+  BLANK_CONTEXT,
   log,
   newOperationId,
+  requestIdentity,
   runInFrame,
   socketFrameOf,
   withLogContext,
@@ -446,23 +448,12 @@ export async function fireCron(
 
   const fireDate = new Date();
   // Each tick is its own operation; what it enqueues names it as parent.
-  const operationId = newOperationId();
   await runInFrame(
     {
-      requestId: null,
-      operationId,
-      parentId: null,
+      ...BLANK_CONTEXT,
+      operationId: newOperationId(),
       trigger: "scheduled",
       job: entry.name,
-      req: undefined,
-      user: null,
-      org: null,
-      role: null,
-      ip: null,
-      app: null,
-      appVersion: null,
-      platform: null,
-      appInferred: false,
     },
     async () => {
       try {
@@ -603,26 +594,15 @@ export function createSocketSessionController(
       onBoundary?: () => Promise<void>,
     ): Promise<void> {
       const token = (payload as { token?: unknown } | null)?.token;
-      // Name the connection before the token is judged, from its unverified
-      // claims, so a refusal logged while resolving says whose it was.
+      // Who the token says it is names the lines written while it is judged
+      // (a refusal), in a frame of their own: only a resolved session names
+      // the connection.
       const claims =
         typeof token === "string" && token ? unverifiedTokenClaims(token) : {};
       const client = parseClientIdentity(
         (payload as { client?: unknown } | null)?.client,
       );
-      withLogContext({
-        user: claims.sub ?? null,
-        org: null,
-        role: null,
-        ...(client
-          ? {
-              app: client.app,
-              appVersion: client.appVersion,
-              platform: client.platform,
-              appInferred: false,
-            }
-          : {}),
-      });
+      if (client) withLogContext(client);
       const result = await reconciler.reconcile(async () => {
         clearExpiry();
         // reconcile() has already cleared the published session, so an
@@ -633,7 +613,10 @@ export function createSocketSessionController(
         await onBoundary?.();
         if (authAdapter && typeof token === "string" && token) {
           try {
-            return await authAdapter.resolveToken(token);
+            return await runInFrame(
+              { user: claims.sub ?? null, org: null, role: null },
+              () => authAdapter.resolveToken(token),
+            );
           } catch {
             return null;
           }
@@ -643,20 +626,7 @@ export function createSocketSessionController(
       const session = result.applied ? result.session : reconciler.session;
       const userId = session?.user?.id ?? null;
       if (result.applied) {
-        // A refused token's claims named the refusal; they do not name the
-        // connection. Only a resolved session does.
-        const orgRole = session?.user?.orgRole;
-        withLogContext({
-          user: userId,
-          org:
-            typeof session?.user?.orgId === "string" ? session.user.orgId : null,
-          role:
-            typeof orgRole === "string" && orgRole
-              ? orgRole.replace(/^org:/, "")
-              : null,
-        });
-      }
-      if (result.applied) {
+        withLogContext(requestIdentity({ session }));
         helloAt = Date.now();
         renews = 0;
         lastRenewAt = 0;
@@ -1586,28 +1556,17 @@ export function createApp(config: AppConfig): ParcaeApp {
         // restored onto every listener by listenSafely. The hello names
         // the user and app on it.
         const handshake = socket.handshake;
-        const handshakeClient = parseClientIdentity(
-          handshake.headers?.["x-freia-client"],
-        );
         const connectedAt = Date.now();
+        // A line defaults every key it does not find to null.
         Object.assign(socketFrameOf(socket), {
           trigger: "socket",
           operationId: newOperationId(),
-          requestId: null,
-          parentId: null,
-          job: null,
           ip:
             clientIp({
               headers: handshake.headers,
               socket: { remoteAddress: handshake.address },
             }) || null,
-          user: null,
-          org: null,
-          role: null,
-          app: handshakeClient?.app ?? null,
-          appVersion: handshakeClient?.appVersion ?? null,
-          platform: handshakeClient?.platform ?? null,
-          appInferred: false,
+          ...parseClientIdentity(handshake.headers?.["x-freia-client"]),
           // Only the user agent, so a client that names no app is inferred.
           req: { headers: { "user-agent": handshake.headers?.["user-agent"] } },
         });

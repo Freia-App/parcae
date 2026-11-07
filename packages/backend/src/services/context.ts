@@ -1,5 +1,12 @@
 import type { Job } from "bullmq";
-import { currentFrame, log, runInFrame } from "../log";
+import {
+  currentFrame,
+  type LogApp,
+  type LogTrigger,
+  log,
+  requestIdentity,
+  runInFrame,
+} from "../log";
 /**
  * @parcae/backend — Global service context
  *
@@ -213,10 +220,10 @@ export async function enqueue(
 export interface JobLogContext {
   requestId: string | null;
   operationId: string | null;
-  trigger: string | null;
+  trigger: LogTrigger | null;
   user: string | null;
   org: string | null;
-  app: string | null;
+  app: LogApp | null;
 }
 
 function stampJobContext(data: any): any {
@@ -229,20 +236,15 @@ function stampJobContext(data: any): any {
 export function jobLogContext(): JobLogContext | null {
   const frame = currentFrame();
   if (!frame) return null;
-  const req = frame.req as any;
-  const sessionUser = req?.session?.user;
-  const pick = (...values: unknown[]) =>
-    (values.find((v) => typeof v === "string" && v) as string | undefined) ??
-    null;
-  const ctx: JobLogContext = {
+  const who = requestIdentity(frame.req);
+  return {
     requestId: frame.requestId ?? null,
     operationId: frame.operationId ?? null,
     trigger: frame.trigger ?? null,
-    user: pick(req?.userId, sessionUser?.id, frame.user),
-    org: pick(req?.orgId, sessionUser?.orgId, frame.org),
+    user: who.user ?? frame.user ?? null,
+    org: who.org ?? frame.org ?? null,
     app: frame.app ?? null,
   };
-  return ctx;
 }
 
 // ─── lock() ──────────────────────────────────────────────────────────────────

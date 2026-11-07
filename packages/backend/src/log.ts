@@ -15,6 +15,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
+import { parseBoolString } from "./config";
 
 export { clientIp } from "./client-identity";
 
@@ -44,8 +45,6 @@ export interface LogContext {
   app: LogApp | null;
   appVersion: string | null;
   platform: string | null;
-  /** True when `app` was guessed from the user agent and role, not sent. */
-  appInferred: boolean;
   requestId: string | null;
   operationId: string | null;
   parentId: string | null;
@@ -58,13 +57,11 @@ export interface LogContext {
   req: unknown;
 }
 
-/** Request-context state that rides the same frame (`services/context.ts`). */
-export interface FrameInternals {
+// Request-context state rides the same frame (`services/context.ts`).
+type Frame = Partial<LogContext> & {
   requestUser?: { id: string; [key: string]: any } | null;
   refLoader?: unknown;
-}
-
-type Frame = Partial<LogContext> & FrameInternals;
+};
 
 export interface Line {
   schema: "freia.log.v2";
@@ -117,9 +114,9 @@ export function currentFrame(): Readonly<Frame> | undefined {
  * trigger and job. A nested frame is a new object with the same ids, so
  * key per-operation state on `operationId`, not on the object.
  */
-export function currentLogContext(): Readonly<Partial<LogContext>> | undefined {
-  return frames.getStore();
-}
+export const currentLogContext: () =>
+  | Readonly<Partial<LogContext>>
+  | undefined = currentFrame;
 
 /** @internal Run `fn` in a frame built from the current one plus `patch`. */
 export function runInFrame<T>(patch: Frame, fn: () => T): T {
@@ -170,9 +167,10 @@ function processFields() {
   const metadata = env.ECS_CONTAINER_METADATA_URI_V4 ?? "";
   const task = /\/v4\/([0-9a-f]{32})-/.exec(metadata)?.[1] ?? null;
   return {
+    // RUN_SERVER read as config.ts reads it, so "0" or "off" is a daemon too.
     service: env.FREIA_EVAL_PROFILE
       ? "eval"
-      : env.RUN_SERVER === "false"
+      : parseBoolString(env.RUN_SERVER?.trim() ?? "") === false
         ? "daemon"
         : "api",
     environment:
@@ -210,7 +208,8 @@ const CONTEXT_KEYS = [
   "trigger",
   "job",
 ] as const;
-const RESERVED = new Set<string>([
+// The keys every line opens with, before the context and caller fields.
+const HEADER_KEYS = [
   "schema",
   "at",
   "level",
@@ -221,10 +220,30 @@ const RESERVED = new Set<string>([
   "deployment",
   "lane",
   "task",
+] as const;
+
+/** Keys the line owns: a caller field can fill one nobody set, never more. */
+export const RESERVED_LOG_KEYS: ReadonlySet<string> = new Set<string>([
+  ...HEADER_KEYS,
+  ...CONTEXT_KEYS,
   "droppedFields",
   "appInferred",
-  ...CONTEXT_KEYS,
 ]);
+
+/**
+ * A frame with every context key cleared, for a seam that starts its own
+ * operation (a request, a job, a cron tick) inside whatever frame called it.
+ * The request context (`requestUser`, `refLoader`) is left as it was.
+ */
+export const BLANK_CONTEXT: Readonly<Partial<LogContext>> = Object.freeze({
+  ...Object.fromEntries(CONTEXT_KEYS.map((key) => [key, null])),
+  req: undefined,
+});
+
+/** An id from outside the process (a job's `_ctx`, a token's `sub`) as a log value. */
+export function isLogId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(value);
+}
 
 /**
  * A string survives when it reads as an identifier or code: no whitespace,
@@ -282,7 +301,11 @@ function str(value: unknown): string | null {
   return typeof value === "string" && value ? value : null;
 }
 
-function requestIdentity(req: any): {
+/**
+ * @internal Who a request (or a socket's resolved session, as `{ session }`)
+ * is: the API's auth middleware fields first, else the session's.
+ */
+export function requestIdentity(req: any): {
   user: string | null;
   org: string | null;
   role: string | null;
@@ -304,7 +327,7 @@ const BROWSER_AGENT = /Mozilla|Chrome|Safari|Firefox|Edge/i;
 const PATIENT_ROLES = new Set(["patient", "member"]);
 
 /** The app a client without `X-Freia-Client` most likely is. */
-export function inferApp(
+function inferApp(
   userAgent: unknown,
   role: string | null,
 ): LogApp | null {
@@ -322,7 +345,7 @@ const TAG = /^\[([^\]\s]{1,60})\]\s+/;
 function buildLine(level: LogLevel, rawMsg: string, fields?: LogFields): Line {
   const frame = frames.getStore() ?? {};
 
-  let msg = typeof rawMsg === "string" ? rawMsg : String(rawMsg);
+  let msg = String(rawMsg);
   let tag: string | null = null;
   const tagged = TAG.exec(msg);
   if (tagged) {
@@ -345,7 +368,7 @@ function buildLine(level: LogLevel, rawMsg: string, fields?: LogFields): Line {
     trigger: frame.trigger ?? null,
     job: frame.job ?? null,
   };
-  let appInferred = frame.appInferred === true;
+  let appInferred = false;
   if (context.app === null && frame.req) {
     const guessed = inferApp(
       (frame.req as any)?.headers?.["user-agent"],
@@ -376,9 +399,10 @@ function buildLine(level: LogLevel, rawMsg: string, fields?: LogFields): Line {
       const [entries, lost] = project(key, value);
       dropped += lost;
       for (const [k, v] of entries) {
-        if (RESERVED.has(k)) {
+        if (RESERVED_LOG_KEYS.has(k)) {
           // A caller fills a context key nobody set; it never overrides one.
-          if (line[k] === null && v !== null && k !== "schema") line[k] = v;
+          const fits = k !== "ip" || (typeof v === "string" && IP.test(v));
+          if (line[k] === null && fits) line[k] = v;
           continue;
         }
         line[k] = v;
@@ -404,18 +428,7 @@ const LEVEL_COLOUR: Record<LogLevel, string> = {
   warn: "\x1b[33m",
   error: "\x1b[31m",
 };
-const PRETTY_SKIP = new Set([
-  "schema",
-  "at",
-  "level",
-  "msg",
-  "tag",
-  "service",
-  "environment",
-  "deployment",
-  "lane",
-  "task",
-]);
+const PRETTY_SKIP = new Set<string>(HEADER_KEYS);
 
 /** A terminal reads `HH:MM:SS LVL [tag] msg key=value ...`. */
 function prettyLine(line: Line): string {
@@ -480,11 +493,27 @@ function emit(line: Line): void {
 
 function write(level: LogLevel, msg: string, fields?: LogFields): void {
   if (level === "debug" && !process.env.PARCAE_DEBUG) return;
+  if (state.captures.size === 0 && consoleSinkInTests()) {
+    // biome-ignore lint/suspicious/noConsole: the test sink is the console by design
+    if (fields === undefined) console[level](msg);
+    // biome-ignore lint/suspicious/noConsole: the test sink is the console by design
+    else console[level](msg, fields);
+    return;
+  }
   try {
     emit(buildLine(level, msg, fields));
   } catch {
     state.dropped++;
   }
+}
+
+/**
+ * Under vitest with PARCAE_LOG_SINK=console, a line no capture holds goes
+ * to console[level] as the call site wrote it, so a suite written against
+ * console spies reads the call. Never outside a test runner.
+ */
+function consoleSinkInTests(): boolean {
+  return Boolean(process.env.VITEST) && process.env.PARCAE_LOG_SINK === "console";
 }
 
 export const log = {

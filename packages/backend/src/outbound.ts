@@ -38,10 +38,10 @@ const PROVIDERS: Array<[RegExp, string]> = [
   [/^exp\.host$/, "expo"],
 ];
 
+/** The provider behind a host (lower case, no port). */
 export function providerOf(host: string): string {
-  const bare = host.replace(/:\d+$/, "").toLowerCase();
   for (const [pattern, name] of PROVIDERS) {
-    if (pattern.test(bare)) return name;
+    if (pattern.test(host)) return name;
   }
   return "other";
 }
@@ -98,7 +98,6 @@ interface Pending {
   host: string;
   method: string;
   path: string;
-  done: boolean;
 }
 
 const pending = new WeakMap<object, Pending>();
@@ -107,21 +106,21 @@ function start(request: object, host: string, method: unknown, path: unknown) {
   pending.set(request, {
     frame: currentFrame(),
     started: performance.now(),
-    host,
+    host: host.replace(/:\d+$/, "").toLowerCase(),
     method: typeof method === "string" ? method.toUpperCase() : "GET",
     path: typeof path === "string" ? path : "/",
-    done: false,
   });
 }
 
 function finish(request: object, status: number | null, error?: unknown) {
   const call = pending.get(request);
-  if (!call || call.done) return;
-  call.done = true;
+  if (!call) return;
+  // One line per request, and the caller's frame is let go with it.
+  pending.delete(request);
   const provider = providerOf(call.host);
   const fields = {
     provider,
-    host: call.host.replace(/:\d+$/, "").toLowerCase(),
+    host: call.host,
     method: call.method,
     endpoint: endpointOf(provider, call.path),
     status,
@@ -148,6 +147,15 @@ function hostOfOrigin(origin: unknown): string {
   }
 }
 
+const onAnswer = (message: any) => {
+  if (message?.request) {
+    finish(message.request, message.response?.statusCode ?? null);
+  }
+};
+const onError = (message: any) => {
+  if (message?.request) finish(message.request, null, message.error);
+};
+
 const INSTALLED = Symbol.for("freia.log.outbound");
 
 /** Subscribe once per process; later calls are no-ops. */
@@ -161,14 +169,8 @@ export function observeOutboundCalls(): void {
     if (!request) return;
     start(request, hostOfOrigin(request.origin), request.method, request.path);
   });
-  diagnostics.subscribe("undici:request:headers", (message: any) => {
-    if (message?.request) {
-      finish(message.request, message.response?.statusCode ?? null);
-    }
-  });
-  diagnostics.subscribe("undici:request:error", (message: any) => {
-    if (message?.request) finish(message.request, null, message.error);
-  });
+  diagnostics.subscribe("undici:request:headers", onAnswer);
+  diagnostics.subscribe("undici:request:error", onError);
 
   diagnostics.subscribe("http.client.request.start", (message: any) => {
     const request = message?.request;
@@ -179,12 +181,6 @@ export function observeOutboundCalls(): void {
       "";
     start(request, String(host), request.method, request.path);
   });
-  diagnostics.subscribe("http.client.response.finish", (message: any) => {
-    if (message?.request) {
-      finish(message.request, message.response?.statusCode ?? null);
-    }
-  });
-  diagnostics.subscribe("http.client.request.error", (message: any) => {
-    if (message?.request) finish(message.request, null, message.error);
-  });
+  diagnostics.subscribe("http.client.response.finish", onAnswer);
+  diagnostics.subscribe("http.client.request.error", onError);
 }

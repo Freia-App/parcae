@@ -22,7 +22,13 @@
  */
 
 import { parseClientIdentity } from "../client-identity";
-import { newOperationId, runInFrame } from "../log";
+import {
+  BLANK_CONTEXT,
+  isLogId,
+  type LogTrigger,
+  newOperationId,
+  runInFrame,
+} from "../log";
 import { jobLogContext } from "../services/context";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -93,8 +99,12 @@ export function clearJobs(): void {
 
 // ─── Job frames ──────────────────────────────────────────────────────────────
 
-const LOG_ID = /^[A-Za-z0-9_.:-]{1,64}$/;
-const JOB_TRIGGERS = new Set(["interactive", "scheduled", "manual", "socket"]);
+const JOB_TRIGGERS = new Set<string>([
+  "interactive",
+  "scheduled",
+  "manual",
+  "socket",
+]);
 
 /**
  * A job runs as its own operation under the frame that enqueued it: the
@@ -106,29 +116,20 @@ function jobFrame(name: string, raw: unknown) {
     string,
     unknown
   >;
-  const id = (value: unknown) =>
-    typeof value === "string" && LOG_ID.test(value) ? value : null;
-  const trigger =
-    typeof ctx.trigger === "string" && JOB_TRIGGERS.has(ctx.trigger)
-      ? (ctx.trigger as "interactive" | "scheduled" | "manual" | "socket")
-      : ("none" as const);
+  const id = (value: unknown) => (isLogId(value) ? value : null);
   return {
+    ...BLANK_CONTEXT,
     requestId: id(ctx.requestId),
     operationId: newOperationId(),
     parentId: id(ctx.operationId),
-    trigger,
+    trigger:
+      typeof ctx.trigger === "string" && JOB_TRIGGERS.has(ctx.trigger)
+        ? (ctx.trigger as LogTrigger)
+        : ("none" as const),
     job: name,
     user: id(ctx.user),
     org: id(ctx.org),
-    role: null,
-    ip: null,
-    app:
-      parseClientIdentity(typeof ctx.app === "string" ? ctx.app : null)?.app ??
-      null,
-    appVersion: null,
-    platform: null,
-    appInferred: false,
-    req: undefined,
+    app: parseClientIdentity(ctx.app)?.app ?? null,
   };
 }
 

@@ -64,7 +64,6 @@ describe("client diagnostics from a hello", () => {
         nested: { a: 1 },
       }),
     ).toEqual({
-      disconnect: "transport close".repeat(10).replace(/ /g, "-").slice(0, 40),
       offlineMs: 4_201,
       hiddenAtDisconnect: true,
       renewAttempts: 0,

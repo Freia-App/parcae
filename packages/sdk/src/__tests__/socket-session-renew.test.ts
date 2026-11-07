@@ -273,7 +273,8 @@ describe("SocketTransport — why the last connection lapsed", () => {
         renewAttempts: 8,
         renewLateMs: 0,
         renewOutcome: "token-error",
-        renewError: "Network request failed while offline",
+        // The error's name: the server's log keeps codes, not messages.
+        renewError: "Error",
       },
     });
     transport.dispose();

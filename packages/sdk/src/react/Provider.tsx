@@ -5,6 +5,7 @@ import { Model } from "@parcae/model";
 import { createClient } from "../client";
 import type { ParcaeClient, ClientConfig } from "../client";
 import type { AuthClientAdapter } from "../auth-adapter";
+import type { SocketTransportConfig } from "../transports/socket";
 import { ParcaeContext } from "./context";
 import { _onResyncRequired, _purgeCacheForUser } from "./useQuery";
 import {
@@ -47,15 +48,8 @@ export interface ParcaeProviderProps {
    * render creates a fresh client.
    */
   extraHeaders?: Record<string, string>;
-  /**
-   * Who this client is, as `<app>/<version>/<platform>` (for example
-   * `dashboard/2026.11.07/web`). Sent as `client` in every hello, so the
-   * server's log names the app on a browser, which cannot set socket
-   * headers. A function is read at each hello, so the identity can follow
-   * the page without recreating the client; pass a stable function, as a
-   * new one each render creates a new client.
-   */
-  clientIdentity?: string | (() => string | undefined);
+  /** The hello's `client`; see `SocketTransportConfig.clientIdentity`. */
+  clientIdentity?: SocketTransportConfig["clientIdentity"];
   /**
    * Transport watchdog stale threshold in ms; `0` disables it.
    * Forwarded to the owned client's transport (url form only).

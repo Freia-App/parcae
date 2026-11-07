@@ -14,6 +14,7 @@ import type { TokenRequest } from "./auth-adapter";
 import type {
   ResyncEntry,
   ResyncResult,
+  SocketTransportConfig,
   TransportDiagnostics,
 } from "./transports/socket";
 import type { SessionMachine } from "./session-machine";
@@ -40,15 +41,8 @@ export interface ClientConfig {
    * Pass a stable reference when this config is created during render.
    */
   extraHeaders?: Record<string, string>;
-  /**
-   * Who this client is, as `<app>/<version>/<platform>` (for example
-   * `dashboard/2026.11.07/web`). Sent as `client` in every hello, so the
-   * server's log names the app on a browser, which cannot set socket
-   * headers. A function is read at each hello, so the identity can follow
-   * the page without recreating the client; pass a stable function, as a
-   * new one each render creates a new client.
-   */
-  clientIdentity?: string | (() => string | undefined);
+  /** The hello's `client`; see `SocketTransportConfig.clientIdentity`. */
+  clientIdentity?: SocketTransportConfig["clientIdentity"];
   /**
    * Dial the socket at construction (default `true`). Pass `false`
    * for a connection-less client — e.g. one created at module scope

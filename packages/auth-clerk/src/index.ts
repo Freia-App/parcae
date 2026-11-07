@@ -29,6 +29,7 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import {
   log,
+  unverifiedTokenClaims,
   type AuthAdapter,
   type AuthSession,
   type AuthSetupContext,
@@ -89,21 +90,6 @@ function defaultMapUser(clerkUser: any): Record<string, any> {
 const REFUSAL_LOG_WINDOW_MS = 60_000;
 const REFUSAL_LOG_LIMIT = 50;
 
-/** The `sub` and `exp` of a token that failed verification, read without trusting it. */
-function unverifiedClaims(token: string): { sub?: string; exp?: number } {
-  try {
-    const payload = JSON.parse(
-      Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"),
-    );
-    return {
-      sub: typeof payload?.sub === "string" ? payload.sub.slice(0, 64) : undefined,
-      exp: typeof payload?.exp === "number" ? payload.exp : undefined,
-    };
-  } catch {
-    return {};
-  }
-}
-
 // ─── clerk() — factory function ──────────────────────────────────────────────
 
 /**
@@ -143,7 +129,7 @@ export function clerk(config: ClerkConfig): AuthAdapter {
         : cause instanceof Error
           ? cause.name
           : "unknown";
-    const { sub, exp } = unverifiedClaims(token);
+    const { sub, exp } = unverifiedTokenClaims(token);
     const key = `${sub}:${reason}`;
     const now = Date.now();
     if (now - refusalWindowStart >= REFUSAL_LOG_WINDOW_MS) {

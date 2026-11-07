@@ -7,6 +7,8 @@
  * cut short.
  */
 
+import { isLogId } from "./log";
+
 type Field = string | number | boolean;
 
 const RENEW_OUTCOMES = new Set([
@@ -66,14 +68,26 @@ export function clientDiagnostics(raw: unknown): Record<string, Field> | null {
   return Object.keys(out).length > 0 ? out : null;
 }
 
-/**
- * socket.io's disconnect reason as a code ("transport close" becomes
- * "transport-close"), so it survives the log's no-whitespace rule.
- */
+// socket.io's disconnect reasons, server and client side, as codes that
+// survive the log's no-whitespace rule. Anything else is not logged.
+const DISCONNECT_REASONS = new Map(
+  [
+    "transport close",
+    "transport error",
+    "ping timeout",
+    "parse error",
+    "io server disconnect",
+    "io client disconnect",
+    "server namespace disconnect",
+    "client namespace disconnect",
+    "server shutting down",
+    "forced close",
+    "forced server close",
+  ].map((reason) => [reason, reason.replace(/ /g, "-")]),
+);
+
 export function disconnectReason(raw: unknown): string | undefined {
-  if (typeof raw !== "string") return undefined;
-  const code = raw.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 40);
-  return /^[a-z-]+$/.test(code) ? code : undefined;
+  return typeof raw === "string" ? DISCONNECT_REASONS.get(raw) : undefined;
 }
 
 /**
@@ -88,12 +102,8 @@ export function unverifiedTokenClaims(token: string): {
     const payload = JSON.parse(
       Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"),
     );
-    const sub = payload?.sub;
     return {
-      sub:
-        typeof sub === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(sub)
-          ? sub
-          : undefined,
+      sub: isLogId(payload?.sub) ? payload.sub : undefined,
       exp:
         typeof payload?.exp === "number" && Number.isFinite(payload.exp)
           ? payload.exp
