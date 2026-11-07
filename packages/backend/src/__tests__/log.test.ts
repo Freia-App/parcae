@@ -88,6 +88,26 @@ describe("the field rule", () => {
     expect(logs.lines[0]).toMatchObject({ user: "user_A", org: "org_9" });
   });
 
+  it("names the service as config reads RUN_SERVER: unset serves", () => {
+    const service = (value: string | undefined) => {
+      const before = process.env.RUN_SERVER;
+      if (value === undefined) delete process.env.RUN_SERVER;
+      else process.env.RUN_SERVER = value;
+      log.info("svc");
+      if (before === undefined) delete process.env.RUN_SERVER;
+      else process.env.RUN_SERVER = before;
+      return logs.lines.at(-1)!.service;
+    };
+    expect([undefined, "", "true", "false", "0", "off"].map(service)).toEqual([
+      "api",
+      "api",
+      "api",
+      "daemon",
+      "daemon",
+      "daemon",
+    ]);
+  });
+
   it("writes every key of the line shape, null when unknown", () => {
     log.info("bare");
     expect(Object.keys(logs.lines[0]!).sort()).toEqual(

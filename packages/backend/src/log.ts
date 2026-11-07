@@ -167,10 +167,11 @@ function processFields() {
   const metadata = env.ECS_CONTAINER_METADATA_URI_V4 ?? "";
   const task = /\/v4\/([0-9a-f]{32})-/.exec(metadata)?.[1] ?? null;
   return {
-    // RUN_SERVER read as config.ts reads it, so "0" or "off" is a daemon too.
+    // RUN_SERVER read as config.ts reads it: unset serves, "0" or "off"
+    // is a daemon as much as "false".
     service: env.FREIA_EVAL_PROFILE
       ? "eval"
-      : parseBoolString(env.RUN_SERVER?.trim() ?? "") === false
+      : env.RUN_SERVER?.trim() && parseBoolString(env.RUN_SERVER.trim()) === false
         ? "daemon"
         : "api",
     environment:
