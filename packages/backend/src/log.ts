@@ -268,16 +268,63 @@ function capped(value: string): [string, number] {
   return value.length > MAX_FIELD ? [value.slice(0, MAX_FIELD), 1] : [value, 0];
 }
 
+/** A nested error or a cause, as JSON. */
+function errorJson(err: Error & { code?: unknown }) {
+  return { name: err.name, code: err.code, message: err.message };
+}
+
 /**
- * An error's stack frames, every one. The stack's first lines repeat the
- * message, which `<key>Message` already carries under the cap, so a long
- * message cannot make the line too long to stay one CloudWatch event.
+ * JSON text for a value, written only until it passes the cap, so a huge
+ * result costs what its first 2,000 characters cost rather than a walk of
+ * the whole object on the event loop every clinic shares. It reads as
+ * JSON.stringify would, except that a buffer is its byte count, a bigint a
+ * string, a cycle "[Circular]" and a nested error its name, code and
+ * message. Returns the text and whether it was cut.
  */
-function stackFrames(err: Error): string | null {
-  if (typeof err.stack !== "string") return null;
-  const messageLines = String(err.message).split("\n").length;
-  const frames = err.stack.split("\n").slice(messageLines).join("\n");
-  return frames || null;
+function jsonWithin(value: unknown): [string, boolean] {
+  let out = "";
+  const path = new Set<object>();
+  const put = (text: string) => {
+    out += text;
+    return out.length <= MAX_FIELD;
+  };
+  const write = (raw: unknown): boolean => {
+    let v = raw;
+    if (v instanceof Error) v = errorJson(v);
+    else if (ArrayBuffer.isView(v)) return put(`"<${v.byteLength} bytes>"`);
+    else if (v !== null && typeof (v as { toJSON?: unknown })?.toJSON === "function") {
+      v = (v as { toJSON(): unknown }).toJSON();
+    }
+    if (typeof v === "string") {
+      return put(JSON.stringify(v.length > MAX_FIELD ? v.slice(0, MAX_FIELD + 1) : v));
+    }
+    if (typeof v === "number") return put(Number.isFinite(v) ? String(v) : "null");
+    if (typeof v === "boolean") return put(String(v));
+    if (typeof v === "bigint") return put(`"${v}"`);
+    if (v === null || typeof v !== "object") return put("null");
+    if (path.has(v)) return put('"[Circular]"');
+    path.add(v);
+    let ok: boolean;
+    if (Array.isArray(v)) {
+      ok = put("[");
+      for (let i = 0; ok && i < v.length; i++) ok = (i === 0 || put(",")) && write(v[i]);
+      ok = ok && put("]");
+    } else {
+      ok = put("{");
+      let first = true;
+      for (const k of Object.keys(v)) {
+        if (!ok) break;
+        const x = (v as Record<string, unknown>)[k];
+        if (x === undefined || typeof x === "function" || typeof x === "symbol") continue;
+        ok = (first || put(",")) && put(`${JSON.stringify(k)}:`) && write(x);
+        first = false;
+      }
+      ok = ok && put("}");
+    }
+    path.delete(v);
+    return ok;
+  };
+  return write(value) ? [out, false] : [out.slice(0, MAX_FIELD), true];
 }
 
 function projectError(key: string, value: Error): [Array<[string, Json]>, number] {
@@ -299,20 +346,27 @@ function projectError(key: string, value: Error): [Array<[string, Json]>, number
     [`${key}Constraint`, err.constraint],
     [`${key}Column`, err.column],
     [`${key}Detail`, err.detail],
+    // fetch's "fetch failed" and the AWS SDK put the real reason here.
+    [`${key}Cause`, err.cause instanceof Error ? errorJson(err.cause) : err.cause],
   ];
   const out: Array<[string, Json]> = [];
   let truncated = 0;
   for (const [k, v] of parts) {
-    if (typeof v === "string" && v) {
-      const [text, cut] = capped(v);
-      out.push([k, text]);
-      truncated += cut;
-    } else if (typeof v === "number" && Number.isFinite(v)) {
-      out.push([k, v]);
-    }
+    if (v === null || v === undefined || v === "") continue;
+    const [entries, cut] = project(k, v);
+    out.push(...entries);
+    truncated += cut;
   }
-  const stack = stackFrames(err);
-  if (stack) out.push([`${key}Stack`, stack]);
+  // Only the frames: the stack opens with the message, which is above.
+  const frames = String(err.stack ?? "")
+    .split("\n")
+    .filter((line) => /^\s+at /.test(line))
+    .join("\n");
+  if (frames) {
+    const [text, cut] = capped(frames);
+    out.push([`${key}Stack`, text]);
+    truncated += cut;
+  }
   return [out, truncated];
 }
 
@@ -333,18 +387,16 @@ function project(key: string, value: unknown): [Array<[string, Json]>, number] {
     return [[[key, text]], cut];
   }
   if (value instanceof Error) return projectError(key, value);
-  let json: string | undefined;
+  let json: string;
+  let cut: boolean;
   try {
-    json = JSON.stringify(value);
+    [json, cut] = jsonWithin(value);
   } catch {
-    // A cycle or a bigint: its string form.
-    const [text, cut] = capped(String(value));
-    return [[[key, text]], cut];
+    // A getter or toJSON that throws: the line still goes out.
+    return [[[key, "[unserializable]"]], 0];
   }
-  if (json === undefined) return [[], 0];
-  // Under the cap it stays JSON a query can reach into; over it, the cut text.
-  if (json.length <= MAX_FIELD) return [[[key, JSON.parse(json) as Json]], 0];
-  return [[[key, json.slice(0, MAX_FIELD)]], 1];
+  // Whole, it stays JSON a query can reach into; cut, it is the text to the cap.
+  return cut ? [[[key, json]], 1] : [[[key, JSON.parse(json) as Json]], 0];
 }
 
 // ─── Request-derived identity ────────────────────────────────────────────────
@@ -444,6 +496,8 @@ function buildLine(level: LogLevel, rawMsg: string, fields?: LogFields): Line {
   };
 
   let truncated = 0;
+  const written: string[] = [];
+  let roughSize = 0;
   // An Error passed as the whole second argument is logged as `error`.
   if (fields instanceof Error) fields = { error: fields };
   if (fields && typeof fields === "object") {
@@ -453,16 +507,42 @@ function buildLine(level: LogLevel, rawMsg: string, fields?: LogFields): Line {
       for (const [k, v] of entries) {
         if (RESERVED_LOG_KEYS.has(k)) {
           // A caller fills a context key nobody set; it never overrides one.
-          const fits = typeof v === "string" && (k !== "ip" || IP.test(v));
+          const fits = k === "ip" ? typeof v === "string" && IP.test(v) : isLogId(v);
           if (line[k] === null && fits) line[k] = v;
           continue;
         }
         line[k] = v;
+        written.push(k);
+        roughSize += typeof v === "string" ? v.length : v !== null && typeof v === "object" ? MAX_FIELD : 8;
       }
     }
   }
   if (appInferred && line.app !== null) line.appInferred = true;
   if (truncated > 0) line.truncatedFields = truncated;
+  // Only a line with long fields can pass the limit, so only it is measured.
+  return roughSize > MAX_FIELD ? fitted(line, written) : line;
+}
+
+/**
+ * Docker splits a stdout line over 16 KB into separate CloudWatch events,
+ * which no longer parse as JSON, so every filter and query misses them. A
+ * line past the limit gives up its longest caller fields, each counted in
+ * `truncatedFields`, until it fits.
+ */
+const MAX_LINE_BYTES = 15_000;
+
+function fitted(line: Line, callerKeys: string[]): Line {
+  let bytes = Buffer.byteLength(JSON.stringify(line));
+  if (bytes <= MAX_LINE_BYTES) return line;
+  const longest = callerKeys
+    .map((key) => [key, Buffer.byteLength(JSON.stringify(line[key]))] as const)
+    .sort((a, b) => b[1] - a[1]);
+  for (const [key, size] of longest) {
+    if (bytes <= MAX_LINE_BYTES) break;
+    delete line[key];
+    line.truncatedFields = (typeof line.truncatedFields === "number" ? line.truncatedFields : 0) + 1;
+    bytes -= size;
+  }
   return line;
 }
 
@@ -550,6 +630,11 @@ function write(level: LogLevel, msg: string, fields?: LogFields): void {
     if (fields === undefined) console[level](msg);
     // biome-ignore lint/suspicious/noConsole: the test sink is the console by design
     else console[level](msg, fields);
+    return;
+  }
+  // A full stdout would drop the line; skip building it.
+  if (state.backpressured && state.captures.size === 0) {
+    state.dropped++;
     return;
   }
   try {

@@ -71,6 +71,60 @@ describe("caller fields", () => {
     expect(JSON.parse(JSON.stringify(line))).toEqual(line);
   });
 
+  it("writes nested errors, buffers, bigints and cycles as JSON, and survives a throwing getter", () => {
+    const cycle: Record<string, unknown> = { id: "a" };
+    cycle.self = cycle;
+    const settled = { status: "rejected", reason: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) };
+    log.info("x", {
+      settled,
+      body: Buffer.from("hello"),
+      count: 12n,
+      cycle,
+      broken: Object.defineProperty({}, "boom", { enumerable: true, get: () => { throw new Error("getter"); } }),
+    });
+    expect(logs.lines[0]).toMatchObject({
+      settled: { status: "rejected", reason: { name: "Error", code: "ETIMEDOUT", message: "timed out" } },
+      body: "<5 bytes>",
+      count: "12",
+      cycle: { id: "a", self: "[Circular]" },
+      broken: "[unserializable]",
+    });
+  });
+
+  it("cuts a million-row result at the cap without walking the rest", () => {
+    const rows = Array.from({ length: 1_000_000 }, (_, i) => ({ id: i }));
+    const started = performance.now();
+    log.info("rows", { rows });
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(logs.lines[0]!.rows).toBe(JSON.stringify(rows.slice(0, 200)).slice(0, 2000));
+    expect(logs.lines[0]!.truncatedFields).toBe(1);
+  });
+
+  it("keeps a line under Docker's 16 KB split by giving up its longest fields", () => {
+    log.error("[api] failed", {
+      ...Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`text${i}`, "é".repeat(2000)])),
+      id: "row_1",
+      error: new Error("boom"),
+    });
+    const line = logs.lines[0]!;
+    expect(Buffer.byteLength(JSON.stringify(line))).toBeLessThanOrEqual(15_000);
+    expect(line).toMatchObject({ id: "row_1", errorMessage: "boom" });
+    const kept = Object.keys(line).filter((key) => key.startsWith("text"));
+    expect(line.truncatedFields).toBe(10 - kept.length);
+  });
+
+  it("names a failed fetch's cause, which is where the reason is", () => {
+    const err = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("connect ECONNREFUSED 10.0.0.7:443"), { code: "ECONNREFUSED" }),
+    });
+    log.error("[terra] pull failed", { error: err });
+    expect(logs.lines[0]).toMatchObject({
+      errorName: "TypeError",
+      errorMessage: "fetch failed",
+      errorCause: { name: "Error", code: "ECONNREFUSED", message: "connect ECONNREFUSED 10.0.0.7:443" },
+    });
+  });
+
   it("writes an error's name, code, status, message and every stack frame", () => {
     const err = Object.assign(new Error("Key (email)=(jane@example.com) exists"), {
       code: "23505",
@@ -141,11 +195,11 @@ describe("caller fields", () => {
     });
   });
 
-  it("lets a field fill a context key nobody set, never override one", () => {
-    withLogContext({ user: "user_A", org: null }, () => {
-      log.info("[cron] per clinic", { user: "user_B", org: "org_9" });
+  it("lets a field fill a context key nobody set with an id, never override one", () => {
+    withLogContext({ user: "user_A", org: null, role: null }, () => {
+      log.info("[cron] per clinic", { user: "user_B", org: "org_9", role: "the admin of the clinic" });
     });
-    expect(logs.lines[0]).toMatchObject({ user: "user_A", org: "org_9" });
+    expect(logs.lines[0]).toMatchObject({ user: "user_A", org: "org_9", role: null });
   });
 
   it("names the service as config reads RUN_SERVER: unset serves", () => {
