@@ -7,6 +7,9 @@
 import { z } from "zod";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { parseBoolString } from "./bool-string";
+
+export { parseBoolString };
 
 /**
  * Load .env file into process.env if it exists.
@@ -31,31 +34,6 @@ function loadEnvFile(dir: string = process.cwd()): void {
   }
 }
 
-/**
- * Parse a boolean-like env string. Returns `true`, `false`, or `null` for
- * unrecognised values (which Zod converts to a validation error).
- *
- * Accepts: true/false, 1/0, yes/no, on/off, empty string → false.
- * Used by both `envBoolean` and `parseNameList` so the accepted set
- * is consistent.
- */
-export function parseBoolString(v: string): boolean | null {
-  switch (v.trim().toLowerCase()) {
-    case "true":
-    case "1":
-    case "yes":
-    case "on":
-      return true;
-    case "false":
-    case "0":
-    case "no":
-    case "off":
-    case "":
-      return false;
-    default:
-      return null;
-  }
-}
 
 /**
  * Strict boolean coercion for env vars.
