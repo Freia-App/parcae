@@ -680,6 +680,12 @@ export function createSocketSessionController(
         code: SESSION_BOUNDARY_CODES.changed,
       };
       const token = (payload as { token?: unknown } | null)?.token;
+      // A renew names the client as it is now: a page can move between the
+      // portal and the dashboard without saying hello again.
+      const client = parseClientIdentity(
+        (payload as { client?: unknown } | null)?.client,
+      );
+      if (client) withLogContext(client);
       const snapshot = reconciler.capture();
       if (!authAdapter || !snapshot?.session || typeof token !== "string") {
         return refused;

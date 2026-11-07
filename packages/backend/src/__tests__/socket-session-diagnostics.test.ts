@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSocketSessionController } from "../app";
 import type { AuthAdapter, AuthSession } from "../auth";
-import { captureLogs, type Line, withLogContext } from "../log";
+import { captureLogs, type Line, log, withLogContext } from "../log";
 import { clientDiagnostics, withinLogBudget } from "../socket-diagnostics";
 
 const subscriptions = { unsubscribeAll: () => {} };
@@ -219,6 +219,23 @@ describe("socket session log lines", () => {
         },
       ],
     ]);
+  });
+
+  it("takes the client a renew names, so a page that moved is named right", async () => {
+    const controller = createSocketSessionController(
+      "s1",
+      adapterWith({
+        t1: session("org:patient", 60_000),
+        t2: session("org:patient", 60_000),
+      }),
+      subscriptions,
+    );
+    await withLogContext({ trigger: "socket" }, async () => {
+      await controller.hello({ token: "t1", client: "dashboard/1/web" });
+      await controller.renew({ token: "t2", client: "portal/1/web" });
+      log.info("[socket] after renew");
+    });
+    expect(logs.lines.at(-1)).toMatchObject({ app: "portal", user: "u1" });
   });
 
   it("does not call a token refused when the app checks no tokens", async () => {
