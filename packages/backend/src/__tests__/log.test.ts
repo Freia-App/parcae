@@ -191,6 +191,18 @@ describe("the request frame", () => {
     expect(typeof line!.durationMs).toBe("number");
   });
 
+  it("parses a request's query as url.parse did, without its deprecation warning", async () => {
+    const warnings: string[] = [];
+    const onWarning = (w: Error) => warnings.push(w.name);
+    process.on("warning", onWarning);
+    const base = await start();
+    server!.polka.get("/v1/q", (req: any, res: any) => res.end(JSON.stringify(req.query)));
+    const res = await fetch(`${base}/v1/q?a=1&a=2&b=x%20y&c=`);
+    process.off("warning", onWarning);
+    expect(await res.json()).toEqual({ a: ["1", "2"], b: "x y", c: "" });
+    expect(warnings).not.toContain("DeprecationWarning");
+  });
+
   it("writes no line for the health check or a preflight", async () => {
     const base = await start();
     await fetch(`${base}/v1/health`);

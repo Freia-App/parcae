@@ -7,7 +7,7 @@
 
 import { AsyncResource } from "node:async_hooks";
 import { createServer } from "node:http";
-import { parse as parseUrl } from "node:url";
+import { parse as parseQuery } from "node:querystring";
 import polka from "polka";
 import { Server as SocketServer } from "socket.io";
 import bodyParser, { type OptionsJson } from "body-parser";
@@ -216,8 +216,10 @@ export function createServer_(options: ServerOptions): ServerContext {
     if (req._socketQuery) {
       req.query = req._socketQuery;
     } else if (!req.query || Object.keys(req.query).length === 0) {
-      const parsed = parseUrl(req.url || "", true);
-      req.query = parsed.query || {};
+      // What url.parse(url, true).query gave, without the deprecated
+      // url.parse: the text after the first "?", before any "#".
+      const search = String(req.url ?? "").split("#")[0]!.split("?").slice(1).join("?");
+      req.query = parseQuery(search);
     }
     next();
   });
