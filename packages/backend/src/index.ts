@@ -201,6 +201,7 @@ export {
 export {
   log,
   withLogContext,
+  currentLogContext,
   captureLogs,
   logHealth,
 } from "./log";

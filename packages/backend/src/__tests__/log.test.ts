@@ -8,17 +8,18 @@
 import { EventEmitter } from "node:events";
 import { AsyncResource } from "node:async_hooks";
 import http from "node:http";
-import type { Job } from "bullmq";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { fireCron, runJob } from "../app";
+import { createSocketSessionController, fireCron } from "../app";
 import {
   captureLogs,
   type Line,
   log,
+  runWithFrame,
   socketFrameOf,
   withLogContext,
 } from "../log";
 import { observeOutboundCalls, providerOf, templatePath } from "../outbound";
+import { job } from "../routing/job";
 import { createServer_, listenServer, type ServerContext } from "../server";
 import { _clearServices, _setServices, enqueue } from "../services/context";
 import { shutdownResources } from "../shutdown";
@@ -46,15 +47,19 @@ describe("the field rule", () => {
     expect(kept).not.toHaveProperty("droppedFields");
   });
 
-  it("drops long strings, arrays, objects and email addresses", () => {
+  it("drops long strings, dates, arrays, objects, emails, phones and encoded prose", () => {
     log.info("z", {
       long: "a".repeat(81),
       edge: "b".repeat(80),
+      dob: new Date("1961-03-04"),
       list: ["a"],
       nested: { a: 1 },
       email: "jane@example.com",
+      phone: "+61412345678",
+      encoded: "patient%20said%20knee%20hurts",
+      plussed: "knee+hurts+badly",
     });
-    expect(logs.lines[0]).toMatchObject({ edge: "b".repeat(80), droppedFields: 4 });
+    expect(logs.lines[0]).toMatchObject({ edge: "b".repeat(80), droppedFields: 8 });
   });
 
   it("keeps an error's name, code and status, never its message", () => {
@@ -99,6 +104,7 @@ describe("the field rule", () => {
 
 describe("the request frame", () => {
   let server: ServerContext | null = null;
+  const parked = new EventEmitter();
   afterEach(async () => {
     if (server) await shutdownResources(server);
     server = null;
@@ -117,6 +123,17 @@ describe("the request frame", () => {
     });
     server.polka.get("/v1/slow", (req: any) => {
       req.userId = "user_2xyzABC";
+    });
+    // A long-poll parks its response; another request ends it.
+    server.polka.get("/v1/wait", (req: any, res: any) => {
+      req.userId = "user_waiter";
+      parked.once("go", () => res.end("done"));
+      parked.emit("parked");
+    });
+    server.polka.get("/v1/poke", (req: any, res: any) => {
+      req.userId = "user_poker";
+      parked.emit("go");
+      res.end("ok");
     });
     await listenServer(server.httpServer, 0);
     const address = server.httpServer.address();
@@ -154,10 +171,24 @@ describe("the request frame", () => {
     expect(typeof line!.durationMs).toBe("number");
   });
 
-  it("writes no line for the health check", async () => {
+  it("writes no line for the health check or a preflight", async () => {
     const base = await start();
     await fetch(`${base}/v1/health`);
+    await fetch(`${base}/v1/patients/x`, { method: "OPTIONS" });
     expect(lines("request responded")).toEqual([]);
+  });
+
+  it("writes a parked response's line as its own request, whoever ends it", async () => {
+    const base = await start();
+    const isParked = new Promise((resolve) => parked.once("parked", resolve));
+    const waiting = fetch(`${base}/v1/wait`).then((r) => r.text());
+    await isParked;
+    await fetch(`${base}/v1/poke`).then((r) => r.text());
+    await waiting;
+    const byRoute = Object.fromEntries(
+      lines("request responded").map((l) => [l.route, l.user]),
+    );
+    expect(byRoute).toEqual({ "/v1/wait": "user_waiter", "/v1/poke": "user_poker" });
   });
 
   it("answers preflight allowing the client header", async () => {
@@ -187,7 +218,11 @@ describe("the request frame", () => {
     await pending;
     await new Promise((resolve) => setTimeout(resolve, 50));
     const [line] = lines("request responded");
-    expect(line).toMatchObject({ aborted: true, user: "user_2xyzABC" });
+    expect(line).toMatchObject({
+      aborted: true,
+      status: null,
+      user: "user_2xyzABC",
+    });
     expect(line!.requestId).toMatch(UUID);
   });
 });
@@ -242,6 +277,25 @@ describe("the socket frame", () => {
   });
 });
 
+describe("a refused hello", () => {
+  it("names the token's claimed user on the refusal only, never on the connection", async () => {
+    const part = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
+    const forged = `${part({ alg: "none" })}.${part({ sub: "user_victim", exp: 9_999_999_999 })}.sig`;
+    const socket = {};
+    const frame = socketFrameOf(socket);
+    Object.assign(frame, { trigger: "socket", operationId: "op_sock", user: null });
+    const controller = createSocketSessionController(
+      "s1",
+      { resolveToken: async () => null } as never,
+      { unsubscribeAll() {} },
+    );
+    await runWithFrame(frame, () => controller.hello({ token: forged }));
+    runWithFrame(frame, () => log.info("[socket] disconnected"));
+    expect(lines("hello refused its token")[0]!.user).toBe("user_victim");
+    expect(lines("disconnected")[0]!.user).toBeNull();
+  });
+});
+
 describe("the job frame", () => {
   const added: Array<{ name: string; data: any }> = [];
   beforeEach(() => {
@@ -274,14 +328,11 @@ describe("the job frame", () => {
     const [{ data }] = added as [{ name: string; data: any }];
     expect(data.resultId).toBe("r1");
 
-    await runJob(
-      {
-        name: "results:notify-patient",
-        options: {},
-        handler: async () => log.info("[results] notified"),
-      },
-      { data, attemptsMade: 0 } as unknown as Job,
+    // The handler job() registers is what the worker calls.
+    const entry = job("results:notify-patient", async () =>
+      log.info("[results] notified"),
     );
+    await entry.handler({ data, attempt: 0 });
     const [line] = lines("notified");
     expect(line).toMatchObject({
       requestId: "11111111-1111-4111-8111-111111111111",
@@ -377,5 +428,11 @@ describe("outbound calls", () => {
       "/model/:id/converse",
     );
     expect(templatePath("/files/Jane%20Smith%20bloods.pdf")).toBe("/files/:id");
+    expect(templatePath("/v1/sms/+61412345678/Jane_Smith_bloods.pdf")).toBe(
+      "/v1/sms/:id/:id",
+    );
+    expect(templatePath("/calendars/jane.smith(at)clinic.com/v1.2")).toBe(
+      "/calendars/:id/v1.2",
+    );
   });
 });

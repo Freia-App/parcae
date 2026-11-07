@@ -97,11 +97,10 @@ import {
   runQuerySubscription,
   runQueryStatic,
 } from "./services/query-subscription";
-import { getJobs, type JobEntry } from "./routing/job";
+import { getJobs } from "./routing/job";
 import { getHooks } from "./routing/hook";
 import { getCrons } from "./routing/cron";
 import type { CronEntry } from "./routing/cron";
-import type { Job } from "bullmq";
 import { Cron } from "croner";
 import { getMigrations } from "./routing/migration";
 import { runMigrations } from "./adapters/migrations";
@@ -382,56 +381,12 @@ async function discoverAndImport(
   return count;
 }
 
-// ─── Job frames ──────────────────────────────────────────────────────────────
-
-const LOG_ID = /^[A-Za-z0-9_.:-]{1,64}$/;
-const JOB_TRIGGERS = new Set(["interactive", "scheduled", "manual", "socket"]);
-
-/**
- * A job runs as its own operation under the frame that enqueued it: the
- * enqueuer's operation is its parent, and its request, user, org and app
- * carry over. `_ctx` comes back from Redis, so each value is checked.
- */
-function jobFrame(name: string, raw: unknown) {
-  const ctx = (raw && typeof raw === "object" ? raw : {}) as Record<
-    string,
-    unknown
-  >;
-  const id = (value: unknown) =>
-    typeof value === "string" && LOG_ID.test(value) ? value : null;
-  const app = parseClientIdentity(
-    typeof ctx.app === "string" ? ctx.app : null,
-  )?.app;
-  return {
-    requestId: id(ctx.requestId),
-    operationId: newOperationId(),
-    parentId: id(ctx.operationId),
-    trigger:
-      typeof ctx.trigger === "string" && JOB_TRIGGERS.has(ctx.trigger)
-        ? (ctx.trigger as "interactive" | "scheduled" | "manual" | "socket")
-        : ("none" as const),
-    job: name,
-    user: id(ctx.user),
-    org: id(ctx.org),
-    role: null,
-    ip: null,
-    app: app ?? null,
-    appVersion: null,
-    platform: null,
-    appInferred: false,
-    req: undefined,
+/** Name the request after the pattern it matched, for its log line. */
+function markRoute(pattern: string) {
+  return (req: any, _res: any, next: () => void) => {
+    req._parcaeRoute = pattern;
+    next();
   };
-}
-
-/** What a worker runs for one BullMQ job: the handler, in the job's frame. */
-export function runJob(entry: JobEntry, bullJob: Job): Promise<any> {
-  return runInFrame(jobFrame(entry.name, bullJob.data?._ctx), () =>
-    entry.handler({
-      data: bullJob.data,
-      bullJob,
-      attempt: bullJob.attemptsMade,
-    }),
-  );
 }
 
 // ─── Cron scheduling ─────────────────────────────────────────────────────────
@@ -687,11 +642,14 @@ export function createSocketSessionController(
       });
       const session = result.applied ? result.session : reconciler.session;
       const userId = session?.user?.id ?? null;
-      if (result.applied && session) {
-        const orgRole = session.user?.orgRole;
+      if (result.applied) {
+        // A refused token's claims named the refusal; they do not name the
+        // connection. Only a resolved session does.
+        const orgRole = session?.user?.orgRole;
         withLogContext({
           user: userId,
-          org: typeof session.user?.orgId === "string" ? session.user.orgId : null,
+          org:
+            typeof session?.user?.orgId === "string" ? session.user.orgId : null,
           role:
             typeof orgRole === "string" && orgRole
               ? orgRole.replace(/^org:/, "")
@@ -712,6 +670,7 @@ export function createSocketSessionController(
           if (withinLogBudget()) {
             const exp = claims.exp;
             log.warn("[socket] hello refused its token", {
+              user: claims.sub,
               expiredAgoMs:
                 exp !== undefined && Date.now() > exp * 1000
                   ? Date.now() - exp * 1000
@@ -1416,7 +1375,11 @@ export function createApp(config: AppConfig): ParcaeApp {
           const method = entry.method.toLowerCase() as keyof typeof server.polka;
           if (typeof server.polka[method] === "function") {
             const handlers = [...entry.middlewares, entry.handler];
-            (server.polka[method] as any)(entry.path, ...handlers);
+            (server.polka[method] as any)(
+              entry.path,
+              markRoute(entry.path),
+              ...handlers,
+            );
           }
         }
       } else if (routes.length > 0) {
@@ -1503,7 +1466,13 @@ export function createApp(config: AppConfig): ParcaeApp {
           const queueName = queue.queueNameFor(jobEntry.name);
           queue.createWorker(
             queueName,
-            (bullJob) => runJob(jobEntry, bullJob),
+            async (bullJob) => {
+              return jobEntry.handler({
+                data: bullJob.data,
+                bullJob,
+                attempt: bullJob.attemptsMade,
+              });
+            },
             {
               concurrency,
               lockDuration: jobEntry.options?.lockDuration,

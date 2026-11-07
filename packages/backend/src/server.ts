@@ -104,7 +104,10 @@ function openRequestFrame(req: any, res: any, next: () => void): void {
     },
     () => {
       const path = String(req.url ?? "").split("?")[0] ?? "";
-      if (!HEALTH_PATH.test(path)) recordRequest(req, res, id, path);
+      // Preflights and health checks carry no one's request.
+      if (req.method !== "OPTIONS" && !HEALTH_PATH.test(path)) {
+        recordRequest(req, res, id, path);
+      }
       next();
     },
   );
@@ -114,12 +117,20 @@ function recordRequest(req: any, res: any, id: string, path: string): void {
   const started = performance.now();
   res.setHeader?.("X-Freia-Operation-Id", id);
   let recorded = false;
-  const record = (aborted: boolean) => {
+  // Bound to the request's frame: whoever calls end() (another request
+  // fanning out to parked responses, a timer) the line is this request's.
+  const record = AsyncResource.bind((aborted: boolean) => {
     if (recorded) return;
     recorded = true;
-    const status = typeof res.statusCode === "number" ? res.statusCode : null;
+    const status =
+      aborted && !res.headersSent
+        ? null
+        : typeof res.statusCode === "number"
+          ? res.statusCode
+          : null;
     const fields = {
-      route: templatePath(path),
+      // The pattern the route was registered under, else the path's shape.
+      route: req._parcaeRoute ?? templatePath(path),
       method: req.method,
       status,
       durationMs: Math.round(performance.now() - started),
@@ -128,7 +139,7 @@ function recordRequest(req: any, res: any, id: string, path: string): void {
     };
     if (status !== null && status >= 500) log.error("request responded", fields);
     else log.info("request responded", fields);
-  };
+  });
   // Socket calls answer on a fake response with no events, so the line is
   // written from end(); a real response that closes first records too.
   const end = res.end;
@@ -137,10 +148,7 @@ function recordRequest(req: any, res: any, id: string, path: string): void {
     record(false);
     return result;
   };
-  // The close event fires from the connection, outside the frame.
-  if (typeof res.once === "function") {
-    res.once("close", AsyncResource.bind(() => record(true)));
-  }
+  if (typeof res.once === "function") res.once("close", () => record(true));
 }
 
 export function createServer_(options: ServerOptions): ServerContext {

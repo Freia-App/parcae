@@ -120,14 +120,16 @@ export interface SocketTransportConfig {
    * spreads handshake headers onto every synthetic request, so a
    * header set here reaches middleware like any per-request header.
    */
+  extraHeaders?: Record<string, string>;
   /**
    * Who this client is, as `<app>/<version>/<platform>` (for example
    * `dashboard/2026.11.07/web`). Sent as `client` in every hello, so the
    * server's log names the app on a browser, which cannot set socket
-   * headers.
+   * headers. A function is read at each hello, so the identity can follow
+   * the page without recreating the client; pass a stable function, as a
+   * new one each render creates a new client.
    */
-  clientIdentity?: string;
-  extraHeaders?: Record<string, string>;
+  clientIdentity?: string | (() => string | undefined);
   /** Maximum time to wait for a hello acknowledgement. */
   handshakeTimeout?: number;
   /**
@@ -209,7 +211,7 @@ export class SocketTransport extends EventEmitter implements Transport {
   private url: string;
   private version: string;
   private getToken: (options?: TokenRequest) => Promise<string | null>;
-  private readonly clientIdentity: string | undefined;
+  private readonly clientIdentity: SocketTransportConfig["clientIdentity"];
   private inflight = new Map<string, Promise<any>>();
   private pendingCalls = new Map<string, PendingCall>();
   /**
@@ -285,6 +287,15 @@ export class SocketTransport extends EventEmitter implements Transport {
     string,
     Map<(...args: any[]) => void, (...args: any[]) => void>
   >();
+
+  /** The hello's `client` field, when this client names itself. */
+  private _client(): { client?: string } {
+    const identity =
+      typeof this.clientIdentity === "function"
+        ? this.clientIdentity()
+        : this.clientIdentity;
+    return identity ? { client: identity } : {};
+  }
 
   constructor(config: SocketTransportConfig) {
     super();
@@ -633,7 +644,7 @@ export class SocketTransport extends EventEmitter implements Transport {
         const payload = {
           token,
           ...(diag ? { diag } : {}),
-          ...(this.clientIdentity ? { client: this.clientIdentity } : {}),
+          ...this._client(),
         };
         this.socket.emit("hello", payload, (response: any) => {
           const current = this.activeHandshake;
@@ -1042,9 +1053,7 @@ export class SocketTransport extends EventEmitter implements Transport {
           fail(new Error("Session termination timeout"));
         }, this.handshakeTimeout);
         release = this._trackWaiter(fail, () => clearTimeout(timeout));
-        const anonymous = this.clientIdentity
-          ? { token: null, client: this.clientIdentity }
-          : { token: null };
+        const anonymous = { token: null, ...this._client() };
         this.socket.emit("hello", anonymous, (response: any) => {
           if (settled) return;
           settled = true;

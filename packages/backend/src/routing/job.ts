@@ -21,6 +21,10 @@
  * ```
  */
 
+import { parseClientIdentity } from "../client-identity";
+import { newOperationId, runInFrame } from "../log";
+import { jobLogContext } from "../services/context";
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface JobContext {
@@ -87,6 +91,47 @@ export function clearJobs(): void {
   registeredJobs.length = 0;
 }
 
+// ─── Job frames ──────────────────────────────────────────────────────────────
+
+const LOG_ID = /^[A-Za-z0-9_.:-]{1,64}$/;
+const JOB_TRIGGERS = new Set(["interactive", "scheduled", "manual", "socket"]);
+
+/**
+ * A job runs as its own operation under the frame that enqueued it: the
+ * enqueuer's operation is its parent, and its request, user, org and app
+ * carry over. `_ctx` comes back from Redis, so each value is checked.
+ */
+function jobFrame(name: string, raw: unknown) {
+  const ctx = (raw && typeof raw === "object" ? raw : {}) as Record<
+    string,
+    unknown
+  >;
+  const id = (value: unknown) =>
+    typeof value === "string" && LOG_ID.test(value) ? value : null;
+  const trigger =
+    typeof ctx.trigger === "string" && JOB_TRIGGERS.has(ctx.trigger)
+      ? (ctx.trigger as "interactive" | "scheduled" | "manual" | "socket")
+      : ("none" as const);
+  return {
+    requestId: id(ctx.requestId),
+    operationId: newOperationId(),
+    parentId: id(ctx.operationId),
+    trigger,
+    job: name,
+    user: id(ctx.user),
+    org: id(ctx.org),
+    role: null,
+    ip: null,
+    app:
+      parseClientIdentity(typeof ctx.app === "string" ? ctx.app : null)?.app ??
+      null,
+    appVersion: null,
+    platform: null,
+    appInferred: false,
+    req: undefined,
+  };
+}
+
 // ─── Job registration ────────────────────────────────────────────────────────
 
 /**
@@ -116,7 +161,14 @@ export function job(
   handler: JobHandler,
   options: JobOptions = {},
 ): JobEntry {
-  const entry: JobEntry = { name, handler, options };
+  // Every caller of the handler (the worker, a test) runs it in the job's
+  // frame, restored from the `_ctx` that enqueue() stamped.
+  // A job run inline, with no `_ctx`, is a child of the frame it runs in.
+  const framed: JobHandler = (ctx) =>
+    runInFrame(jobFrame(name, ctx?.data?._ctx ?? jobLogContext()), () =>
+      handler(ctx),
+    );
+  const entry: JobEntry = { name, handler: framed, options };
   const existingIdx = registeredJobs.findIndex((j) => j.name === name);
   if (existingIdx >= 0) {
     registeredJobs[existingIdx] = entry;

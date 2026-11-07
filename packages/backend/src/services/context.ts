@@ -42,8 +42,10 @@ interface RequestContext {
 }
 
 // The request context rides the log frame (`../log.ts`), one async store
-// for who is acting. Only this function sets `requestUser`, so a job's
-// frame, which names its parent's user for the log, never acts as them.
+// for who is acting. Only this function sets `requestUser`. A job's frame
+// names its parent's user for the log and sets no request user: from the
+// worker it has none, and run inline it keeps its caller's, as it did
+// before the two stores were one.
 
 /** Run a callback with request context (user) available to all downstream code. */
 export function runWithRequestContext<T>(
@@ -157,6 +159,10 @@ export interface EnqueueOptions {
  * workers can subscribe selectively (`RUN_JOBS=panel,image`) and external
  * consumers can pick up specific jobs without seeing unrelated work.
  *
+ * Inside a log frame, `data._ctx` is set to the frame's ids (request,
+ * operation, user, org, app) so the job's lines name what queued it; the
+ * key is Parcae's, and a caller's own `_ctx` is replaced.
+ *
  * ```typescript
  * import { enqueue } from "@parcae/backend";
  *
@@ -214,10 +220,15 @@ export interface JobLogContext {
 }
 
 function stampJobContext(data: any): any {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return data;
+  const ctx = jobLogContext();
+  return ctx ? { ...data, _ctx: ctx } : data;
+}
+
+/** The current frame as a job's `_ctx`, or null outside any frame. */
+export function jobLogContext(): JobLogContext | null {
   const frame = currentFrame();
-  if (!frame || !data || typeof data !== "object" || Array.isArray(data)) {
-    return data;
-  }
+  if (!frame) return null;
   const req = frame.req as any;
   const sessionUser = req?.session?.user;
   const pick = (...values: unknown[]) =>
@@ -231,7 +242,7 @@ function stampJobContext(data: any): any {
     org: pick(req?.orgId, sessionUser?.orgId, frame.org),
     app: frame.app ?? null,
   };
-  return { ...data, _ctx: ctx };
+  return ctx;
 }
 
 // ─── lock() ──────────────────────────────────────────────────────────────────

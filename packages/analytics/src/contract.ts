@@ -216,7 +216,10 @@ export function mountContract<T>(
       if (opts.logger) {
         opts.logger.error(`[analytics] ${contract.path} failed`, err);
       } else {
-        log.error(`[analytics] ${contract.path} failed:`, err);
+        log.error("[analytics] contract failed", {
+          contract: contract.path,
+          error: err,
+        });
       }
       respond(res, 500, { error: "internal error" });
     }

@@ -34,6 +34,7 @@ const PROVIDERS: Array<[RegExp, string]> = [
   [/(^|\.)rebateright\.com\.au$/, "rebateright"],
   [/(^|\.)gofax\.com\.au$/, "gofax"],
   [/(^|\.)bunny\.net$/, "bunny"],
+  [/(^|\.)storage\.bunnycdn\.com$/, "bunny-storage"],
   [/^exp\.host$/, "expo"],
 ];
 
@@ -62,7 +63,11 @@ function templateSegment(segment: string): string {
   if (/^[a-z]{2,8}_(?=[A-Za-z0-9]*[A-Z0-9])[A-Za-z0-9]{6,}$/.test(segment)) {
     return ":id";
   }
-  if (/[%@]/.test(segment)) return ":id";
+  // A dot, plus or bracket is a file name, phone number or address, not a
+  // route word; a version segment ("v1.2") is the one dotted word kept.
+  if (/[%@+().]/.test(segment) && !/^v\d+(\.\d+)*$/.test(segment)) {
+    return ":id";
+  }
   if (
     segment.length >= 16 &&
     /^[A-Za-z0-9_-]+$/.test(segment) &&
@@ -81,8 +86,10 @@ export function templatePath(path: string): string {
 }
 
 function endpointOf(provider: string, path: string): string {
-  // An S3 path is an object key, which can carry a file's name.
-  return provider === "s3" ? "/:key" : templatePath(path);
+  // An object store's path is a key, which can carry a file's name.
+  return provider === "s3" || provider === "bunny-storage"
+    ? "/:key"
+    : templatePath(path);
 }
 
 interface Pending {

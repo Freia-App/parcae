@@ -7,14 +7,16 @@
  * `job()` from the `_ctx` that `enqueue()` stamps, and `cron()`.
  *
  * Caller fields are identifiers and codes. A string with whitespace, an
- * `@` or over 80 characters is dropped and counted, as are arrays and
- * objects, so
+ * `@`, `%` or `+`, or over 80 characters is dropped and counted, as are
+ * dates, arrays and objects, so
  * clinical text (notes, names, results, model output) cannot reach a log
  * line through a field. An Error keeps its name, code and status only.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
+
+export { clientIp } from "./client-identity";
 
 export type Field = string | number | boolean | null | undefined | Error;
 export type Fields = Record<string, Field>;
@@ -110,6 +112,15 @@ export function currentFrame(): Readonly<Frame> | undefined {
   return frames.getStore();
 }
 
+/**
+ * The frame the caller runs in, read-only: its operation and request ids,
+ * trigger and job. A nested frame is a new object with the same ids, so
+ * key per-operation state on `operationId`, not on the object.
+ */
+export function currentLogContext(): Readonly<Partial<LogContext>> | undefined {
+  return frames.getStore();
+}
+
 /** @internal Run `fn` in a frame built from the current one plus `patch`. */
 export function runInFrame<T>(patch: Frame, fn: () => T): T {
   return frames.run({ ...frames.getStore(), ...patch }, fn);
@@ -180,11 +191,11 @@ function processFields() {
     task,
   };
 }
-let processIdentity: ReturnType<typeof processFields> | null = null;
 
 // ─── The field rule ──────────────────────────────────────────────────────────
 
 const MAX_STRING = 80;
+const IP = /^[0-9A-Fa-f:.]{2,45}$/;
 const CONTEXT_KEYS = [
   "user",
   "org",
@@ -217,10 +228,11 @@ const RESERVED = new Set<string>([
 
 /**
  * A string survives when it reads as an identifier or code: no whitespace,
- * at most 80 characters, and no `@`, so an email address stays out too.
+ * at most 80 characters, and no `@`, `%` or `+`, so an email address, a
+ * phone number and URL-encoded prose stay out too.
  */
 function keepString(value: string): boolean {
-  return value.length <= MAX_STRING && !/[\s@]/.test(value);
+  return value.length <= MAX_STRING && !/[\s@%+]/.test(value);
 }
 
 type Scalar = string | number | boolean | null;
@@ -237,11 +249,6 @@ function project(key: string, value: unknown): [Array<[string, Scalar]>, number]
   }
   if (typeof value === "string") {
     return keepString(value) ? [[[key, value]], 0] : [[], 1];
-  }
-  if (value instanceof Date) {
-    return Number.isNaN(value.getTime())
-      ? [[[key, null]], 0]
-      : [[[key, value.toISOString()]], 0];
   }
   if (value instanceof Error) {
     const out: Array<[string, Scalar]> = [];
@@ -314,7 +321,6 @@ const TAG = /^\[([^\]\s]{1,60})\]\s+/;
 
 function buildLine(level: LogLevel, rawMsg: string, fields?: LogFields): Line {
   const frame = frames.getStore() ?? {};
-  processIdentity ??= processFields();
 
   let msg = typeof rawMsg === "string" ? rawMsg : String(rawMsg);
   let tag: string | null = null;
@@ -329,7 +335,7 @@ function buildLine(level: LogLevel, rawMsg: string, fields?: LogFields): Line {
     user: fromReq.user ?? frame.user ?? null,
     org: fromReq.org ?? frame.org ?? null,
     role: fromReq.role ?? frame.role ?? null,
-    ip: frame.ip ?? null,
+    ip: typeof frame.ip === "string" && IP.test(frame.ip) ? frame.ip : null,
     app: frame.app ?? null,
     appVersion: frame.appVersion ?? null,
     platform: frame.platform ?? null,
@@ -357,7 +363,8 @@ function buildLine(level: LogLevel, rawMsg: string, fields?: LogFields): Line {
     level,
     msg,
     tag,
-    ...processIdentity,
+    // Read per line: a line written before the env loads must not fix them.
+    ...processFields(),
     ...context,
   };
 
