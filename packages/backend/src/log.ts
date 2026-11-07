@@ -6,13 +6,11 @@
  * the request middleware (`server.ts`), the socket hello (`app.ts`),
  * `job()` from the `_ctx` that `enqueue()` stamps, and `cron()`.
  *
- * Caller fields are identifiers and codes. A string with whitespace, an
- * `@`, `%` or `+`, or over 80 characters is dropped and counted, as are
- * dates, arrays and objects, so
- * clinical text (notes, names, results, model output) cannot reach a log
- * line through a field. An Error keeps its name, code, status, a Postgres
- * error's table, constraint and column, and where it was thrown (`<key>At`,
- * file:line frames in app code); never its message.
+ * Caller fields are kept as passed, so a line says what went wrong without
+ * a second look. A string is cut at 2,000 characters, and arrays, objects
+ * and dates are kept as JSON under the same cap; `truncatedFields` counts
+ * the cuts. An Error writes its name, code, status, message and stack, and
+ * a Postgres error its table, constraint, column and detail.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -21,13 +19,7 @@ import { parseBoolString } from "./bool-string";
 
 export { clientIp } from "./client-identity";
 
-export type Field = string | number | boolean | null | undefined | Error;
-export type Fields = Record<string, Field>;
-/**
- * What a call may pass. Values outside `Field` are dropped at runtime and
- * counted in `droppedFields`, so a mechanical call site passing a whole
- * object still writes its line.
- */
+/** What a call may pass: any value, written as JSON under the field cap. */
 export type LogFields = Readonly<Record<string, unknown>>;
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
@@ -67,13 +59,15 @@ type Frame = Partial<LogContext> & {
   jobRun?: { outcome: JobOutcome };
 };
 
+export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
+
 export interface Line {
   schema: "freia.log.v2";
   at: string;
   level: LogLevel;
   msg: string;
   tag: string | null;
-  [key: string]: string | number | boolean | null;
+  [key: string]: Json;
 }
 
 // ─── Shared state ────────────────────────────────────────────────────────────
@@ -211,9 +205,10 @@ function processFields() {
   };
 }
 
-// ─── The field rule ──────────────────────────────────────────────────────────
+// ─── Caller fields ───────────────────────────────────────────────────────────
 
-const MAX_STRING = 80;
+/** One field's longest value, so a single line stays readable. */
+const MAX_FIELD = 2000;
 const IP = /^[0-9A-Fa-f:.]{2,45}$/;
 const CONTEXT_KEYS = [
   "user",
@@ -247,7 +242,7 @@ const HEADER_KEYS = [
 export const RESERVED_LOG_KEYS: ReadonlySet<string> = new Set<string>([
   ...HEADER_KEYS,
   ...CONTEXT_KEYS,
-  "droppedFields",
+  "truncatedFields",
   "appInferred",
 ]);
 
@@ -266,88 +261,90 @@ export function isLogId(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(value);
 }
 
-/**
- * A string survives when it reads as an identifier or code: no whitespace,
- * at most 80 characters, and no `@`, `%` or `+`, so an email address, a
- * phone number and URL-encoded prose stay out too.
- */
-function keepString(value: string): boolean {
-  return value.length <= MAX_STRING && !/[\s@%+]/.test(value);
-}
-
 type Scalar = string | number | boolean | null;
 
-const CODE_FILE = /^[A-Za-z0-9_.-]{1,60}\.(?:[cm]?[jt]sx?)$/;
+/** A string within the cap, and 1 when it had to be cut. */
+function capped(value: string): [string, number] {
+  return value.length > MAX_FIELD ? [value.slice(0, MAX_FIELD), 1] : [value, 0];
+}
 
 /**
- * Where an error was thrown, never what it said: the top five frames in app
- * code as `file.ts:line` joined by `>`, skipping Node internals and
- * node_modules. The stack's first lines repeat the message, so they are
- * skipped before any frame is read.
+ * An error's stack frames, every one. The stack's first lines repeat the
+ * message, which `<key>Message` already carries under the cap, so a long
+ * message cannot make the line too long to stay one CloudWatch event.
  */
-function stackAt(err: Error): string | null {
+function stackFrames(err: Error): string | null {
   if (typeof err.stack !== "string") return null;
   const messageLines = String(err.message).split("\n").length;
-  const frames: string[] = [];
-  for (const line of err.stack.split("\n").slice(messageLines)) {
-    const frame = /^\s+at (?:.*?\()?(.+?):(\d+):\d+\)?$/.exec(line);
-    if (!frame) continue;
-    const path = frame[1]!;
-    if (path.startsWith("node:") || path.includes("node_modules")) continue;
-    const file = path.split(/[\\/]/).pop()!;
-    if (!CODE_FILE.test(file)) continue;
-    frames.push(`${file}:${frame[2]}`);
-    if (frames.length === 5) break;
+  const frames = err.stack.split("\n").slice(messageLines).join("\n");
+  return frames || null;
+}
+
+function projectError(key: string, value: Error): [Array<[string, Json]>, number] {
+  const err = value as Error & {
+    code?: unknown;
+    status?: unknown;
+    statusCode?: unknown;
+    table?: unknown;
+    constraint?: unknown;
+    column?: unknown;
+    detail?: unknown;
+  };
+  const parts: Array<[string, unknown]> = [
+    [`${key}Name`, err.name],
+    [`${key}Code`, err.code],
+    [`${key}Status`, err.status ?? err.statusCode],
+    [`${key}Message`, err.message],
+    [`${key}Table`, err.table],
+    [`${key}Constraint`, err.constraint],
+    [`${key}Column`, err.column],
+    [`${key}Detail`, err.detail],
+  ];
+  const out: Array<[string, Json]> = [];
+  let truncated = 0;
+  for (const [k, v] of parts) {
+    if (typeof v === "string" && v) {
+      const [text, cut] = capped(v);
+      out.push([k, text]);
+      truncated += cut;
+    } else if (typeof v === "number" && Number.isFinite(v)) {
+      out.push([k, v]);
+    }
   }
-  return frames.length ? frames.join(">").slice(0, 200) : null;
+  const stack = stackFrames(err);
+  if (stack) out.push([`${key}Stack`, stack]);
+  return [out, truncated];
 }
 
 /**
  * Project one caller value onto the line. Returns the entries to write and
- * how many values were dropped.
+ * how many were cut to the cap.
  */
-function project(key: string, value: unknown): [Array<[string, Scalar]>, number] {
-  if (value === undefined) return [[], 0];
+function project(key: string, value: unknown): [Array<[string, Json]>, number] {
+  if (value === undefined || typeof value === "function" || typeof value === "symbol") {
+    return [[], 0];
+  }
   if (value === null || typeof value === "boolean") return [[[key, value]], 0];
   if (typeof value === "number") {
-    return Number.isFinite(value) ? [[[key, value]], 0] : [[[key, null]], 0];
+    return [[[key, Number.isFinite(value) ? value : null]], 0];
   }
   if (typeof value === "string") {
-    return keepString(value) ? [[[key, value]], 0] : [[], 1];
+    const [text, cut] = capped(value);
+    return [[[key, text]], cut];
   }
-  if (value instanceof Error) {
-    const out: Array<[string, Scalar]> = [];
-    let dropped = 0;
-    const err = value as Error & {
-      code?: unknown;
-      status?: unknown;
-      statusCode?: unknown;
-      table?: unknown;
-      constraint?: unknown;
-      column?: unknown;
-    };
-    // A Postgres error's schema names; its detail quotes row values and stays out.
-    const parts: Array<[string, unknown]> = [
-      [`${key}Name`, err.name],
-      [`${key}Code`, err.code],
-      [`${key}Status`, err.status ?? err.statusCode],
-      [`${key}Table`, err.table],
-      [`${key}Constraint`, err.constraint],
-      [`${key}Column`, err.column],
-    ];
-    for (const [k, v] of parts) {
-      if (typeof v === "string") {
-        if (keepString(v)) out.push([k, v]);
-        else dropped++;
-      } else if (typeof v === "number" && Number.isFinite(v)) {
-        out.push([k, v]);
-      }
-    }
-    const at = stackAt(err);
-    if (at) out.push([`${key}At`, at]);
-    return [out, dropped];
+  if (value instanceof Error) return projectError(key, value);
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(value);
+  } catch {
+    // A cycle or a bigint: its string form.
+    const [text, cut] = capped(String(value));
+    return [[[key, text]], cut];
   }
-  return [[], 1];
+  if (json === undefined) return [[], 0];
+  // Under the cap it stays JSON a query can reach into; over it, the cut text.
+  if (json.length <= MAX_FIELD) return [[[key, JSON.parse(json) as Json]], 0];
+  return [[[key, json.slice(0, MAX_FIELD)]], 1];
 }
 
 // ─── Request-derived identity ────────────────────────────────────────────────
@@ -446,17 +443,17 @@ function buildLine(level: LogLevel, rawMsg: string, fields?: LogFields): Line {
     ...context,
   };
 
-  let dropped = 0;
-  // An Error passed as the whole second argument keeps its name and code.
+  let truncated = 0;
+  // An Error passed as the whole second argument is logged as `error`.
   if (fields instanceof Error) fields = { error: fields };
   if (fields && typeof fields === "object") {
     for (const [key, value] of Object.entries(fields)) {
-      const [entries, lost] = project(key, value);
-      dropped += lost;
+      const [entries, cut] = project(key, value);
+      truncated += cut;
       for (const [k, v] of entries) {
         if (RESERVED_LOG_KEYS.has(k)) {
           // A caller fills a context key nobody set; it never overrides one.
-          const fits = k !== "ip" || (typeof v === "string" && IP.test(v));
+          const fits = typeof v === "string" && (k !== "ip" || IP.test(v));
           if (line[k] === null && fits) line[k] = v;
           continue;
         }
@@ -465,7 +462,7 @@ function buildLine(level: LogLevel, rawMsg: string, fields?: LogFields): Line {
     }
   }
   if (appInferred && line.app !== null) line.appInferred = true;
-  if (dropped > 0) line.droppedFields = dropped;
+  if (truncated > 0) line.truncatedFields = truncated;
   return line;
 }
 
@@ -490,7 +487,7 @@ function prettyLine(line: Line): string {
   const time = line.at.slice(11, 19);
   const fields = Object.entries(line)
     .filter(([k, v]) => v !== null && !PRETTY_SKIP.has(k))
-    .map(([k, v]) => `${k}=${typeof v === "string" ? JSON.stringify(v) : v}`)
+    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
     .join(" ");
   return (
     `\x1b[2m${time}\x1b[0m ${LEVEL_COLOUR[line.level]}${LEVEL_LABEL[line.level]}\x1b[0m ` +
