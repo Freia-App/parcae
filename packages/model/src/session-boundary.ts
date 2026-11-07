@@ -48,12 +48,17 @@ export function isSessionBoundaryError(message: string): boolean {
  * fail-open the whole table exists to prevent.
  */
 export function sessionBoundaryOf(error: unknown): SessionBoundary | null {
+  // A transport that rejects with the bare message still names a boundary.
+  if (typeof error === "string") return boundaryOfMessage(error);
   if (typeof error !== "object" || error === null) return null;
   const { code, message } = error as { code?: unknown; message?: unknown };
   for (const kind of Object.keys(SESSION_BOUNDARY_CODES) as SessionBoundary[]) {
     if (code === SESSION_BOUNDARY_CODES[kind]) return kind;
   }
-  if (typeof message !== "string") return null;
+  return typeof message === "string" ? boundaryOfMessage(message) : null;
+}
+
+function boundaryOfMessage(message: string): SessionBoundary | null {
   const lower = message.toLowerCase();
   for (const kind of Object.keys(SESSION_BOUNDARY_ERRORS) as SessionBoundary[]) {
     if (lower.includes(SESSION_BOUNDARY_ERRORS[kind].toLowerCase())) return kind;
