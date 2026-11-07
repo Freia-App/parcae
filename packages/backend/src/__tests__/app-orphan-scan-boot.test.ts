@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => {
   const servers: any[] = [];
 
   const knex = vi.fn(() => {
-    const db = { destroy: vi.fn(async () => {}) };
+    const db = { destroy: vi.fn(async () => {}), on: vi.fn() };
     dbs.push(db);
     return db;
   });

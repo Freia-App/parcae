@@ -109,6 +109,7 @@ import { runMigrations } from "./adapters/migrations";
 import { discoverMigrations } from "./adapters/migration-discovery";
 import type { AuthAdapter, AuthSession } from "./auth";
 import knex from "knex";
+import { observeQueries } from "./query-timing";
 import { shutdownResources } from "./shutdown";
 import type { ShutdownResources } from "./shutdown";
 
@@ -982,6 +983,10 @@ export function createApp(config: AppConfig): ParcaeApp {
         readDb = writeDb;
       }
       resources.readDb = readDb;
+      observeQueries(writeDb, "write");
+      if (readDb !== writeDb) {
+        observeQueries(readDb, "read");
+      }
 
       log.info("Database connected");
 

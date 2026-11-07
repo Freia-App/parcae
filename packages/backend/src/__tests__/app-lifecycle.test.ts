@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => {
   let listenError: Error | null = null;
 
   const knex = vi.fn(() => {
-    const db = { destroy: vi.fn(async () => {}) };
+    const db = { destroy: vi.fn(async () => {}), on: vi.fn() };
     dbs.push(db);
     return db;
   });
