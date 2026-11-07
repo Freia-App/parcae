@@ -338,7 +338,9 @@ export function betterAuth(config: BetterAuthConfig = {}): BetterAuthAdapter {
             "[parcae/auth-betterauth] Auth tables migrated (users, sessions, accounts, verifications)",
           );
         } catch (err) {
-          log.error("[parcae/auth-betterauth] Auth migration failed:", err);
+          log.error("[parcae/auth-betterauth] Auth migration failed", {
+            error: err,
+          });
           await adapter.close();
           throw err;
         }
@@ -394,9 +396,10 @@ export function betterAuth(config: BetterAuthConfig = {}): BetterAuthAdapter {
         },
       };
 
-      log.info(
-        `[parcae/auth-betterauth] Configured (${providers.join(", ")}) → table: ${userTableName}`,
-      );
+      log.info("[parcae/auth-betterauth] Configured", {
+        providers: providers.join(","),
+        table: userTableName,
+      });
     },
 
     async resolveRequest(req: any): Promise<AuthSession | null> {
