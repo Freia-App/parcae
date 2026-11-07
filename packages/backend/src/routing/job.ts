@@ -25,10 +25,10 @@ import { parseClientIdentity } from "../client-identity";
 import {
   BLANK_CONTEXT,
   isLogId,
+  type JobOutcome,
   type LogTrigger,
   log,
   newOperationId,
-  openJobOutcome,
   runInFrame,
 } from "../log";
 import { jobLogContext } from "../services/context";
@@ -144,32 +144,33 @@ function jobFrame(name: string, raw: unknown) {
  * failed. A failed outcome is written at error level.
  */
 async function runLogged(
-  operationId: string,
+  run: { outcome: JobOutcome },
   handler: JobHandler,
   ctx: JobContext,
 ): Promise<any> {
-  const outcome = openJobOutcome(operationId);
   const started = performance.now();
   log.info("job started", { attempt: ctx?.attempt ?? null });
+  let result: any;
+  let thrown: { error: unknown } | null = null;
   try {
-    const result = await handler(ctx);
-    const marked = outcome();
-    const finished =
-      marked === "succeeded" && result?.skipped === true ? "skipped" : marked;
-    log[finished === "failed" ? "error" : "info"]("job finished", {
-      outcome: finished,
-      durationMs: Math.round(performance.now() - started),
-    });
-    return result;
+    result = await handler(ctx);
   } catch (error) {
-    outcome();
-    log.error("job finished", {
-      outcome: "failed",
-      durationMs: Math.round(performance.now() - started),
-      error,
-    });
-    throw error;
+    thrown = { error };
   }
+  const outcome: JobOutcome = thrown
+    ? "failed"
+    : run.outcome === "succeeded" && result?.skipped === true
+      ? "skipped"
+      : run.outcome;
+  log[outcome === "failed" ? "error" : "info"]("job finished", {
+    outcome,
+    durationMs: Math.round(performance.now() - started),
+    ...(thrown ? { error: thrown.error } : {}),
+  });
+  if (thrown) {
+    throw thrown.error;
+  }
+  return result;
 }
 
 // ─── Job registration ────────────────────────────────────────────────────────
@@ -206,8 +207,13 @@ export function job(
   // `job started` and `job finished` lines.
   // A job run inline, with no `_ctx`, is a child of the frame it runs in.
   const framed: JobHandler = (ctx) => {
-    const frame = jobFrame(name, ctx?.data?._ctx ?? jobLogContext());
-    return runInFrame(frame, () => runLogged(frame.operationId, handler, ctx));
+    // Every frame nested in the run copies this holder, so a mark from
+    // anywhere inside lands on this run and an inline child run has its own.
+    const run = { outcome: "succeeded" as JobOutcome };
+    return runInFrame(
+      { ...jobFrame(name, ctx?.data?._ctx ?? jobLogContext()), jobRun: run },
+      () => runLogged(run, handler, ctx),
+    );
   };
   const entry: JobEntry = { name, handler: framed, options };
   const existingIdx = registeredJobs.findIndex((j) => j.name === name);

@@ -464,6 +464,23 @@ describe("the job frame", () => {
     ]);
   });
 
+  it("lands a mark from a nested frame on its run, and keeps an inline child run's mark its own", async () => {
+    const child = job("results:digest-one", async () => {
+      markJobOutcome("skipped");
+    });
+    await job("results:digest", async () => {
+      await withLogContext({ user: "user_2xyzABC" }, async () =>
+        markJobOutcome("partial"),
+      );
+      await child.handler({ data: {} });
+    }).handler({ data: {} });
+
+    expect(lines("job finished").map((l) => [l.job, l.outcome])).toEqual([
+      ["results:digest-one", "skipped"],
+      ["results:digest", "partial"],
+    ]);
+  });
+
   it("writes a run marked failed at error level though it returned", async () => {
     await job("oru:poll-inbound", async () => {
       markJobOutcome("failed");
