@@ -10,7 +10,12 @@
 import { it, expect, beforeAll, afterAll } from "vitest";
 import type { Knex } from "knex";
 import { Model } from "@parcae/model";
-import type { ModelConstructor, Ref, SchemaDefinition } from "@parcae/model";
+import type {
+  ModelConstructor,
+  Ref,
+  SchemaDefinition,
+  ScopeContext,
+} from "@parcae/model";
 import { BackendAdapter } from "../packages/backend/src/adapters/model";
 import {
   createPostgresTestDatabase,
@@ -37,6 +42,10 @@ class Result extends Model {
 }
 
 // ─── Test setup ──────────────────────────────────────────────────────────────
+
+// A client query carries the caller's ctx; without one every ref filter is
+// refused, since there is nobody whose read scope could bound it.
+const CTX = {} as ScopeContext;
 
 let database: Awaited<ReturnType<typeof createPostgresTestDatabase>>;
 let db: Knex;
@@ -128,6 +137,7 @@ describePostgres("Ref subquery: dot-notation via queryFromClient", () => {
           args: ["test.category", ["biometric", "wearable", "fitness"]],
         },
       ],
+      CTX,
     );
 
     const results = await chain.find();
@@ -141,6 +151,7 @@ describePostgres("Ref subquery: dot-notation via queryFromClient", () => {
       Result as unknown as ModelConstructor,
       {},
       [{ method: "where", args: ["test.category", "cognitive"] }],
+      CTX,
     );
 
     const results = await chain.find();
@@ -153,6 +164,7 @@ describePostgres("Ref subquery: dot-notation via queryFromClient", () => {
       Result as unknown as ModelConstructor,
       {},
       [{ method: "where", args: ["test.status", "!=", "archived"] }],
+      CTX,
     );
 
     const results = await chain.find();
@@ -166,6 +178,7 @@ describePostgres("Ref subquery: dot-notation via queryFromClient", () => {
       Result as unknown as ModelConstructor,
       {},
       [{ method: "whereNot", args: ["test.category", "biometric"] }],
+      CTX,
     );
 
     const results = await chain.find();
@@ -184,6 +197,7 @@ describePostgres("Ref subquery: dot-notation via queryFromClient", () => {
           args: ["test.category", ["biometric", "cognitive"]],
         },
       ],
+      CTX,
     );
 
     const results = await chain.find();
@@ -198,6 +212,7 @@ describePostgres("Ref subquery: dot-notation via queryFromClient", () => {
         Result as unknown as ModelConstructor,
         {},
         [{ method: "where", args: ["test.nonexistent", "foo"] }],
+        CTX,
       ),
     ).toThrow('Invalid column "nonexistent" on referenced model "test"');
   });
@@ -209,6 +224,7 @@ describePostgres("Ref subquery: dot-notation via queryFromClient", () => {
         Result as unknown as ModelConstructor,
         {},
         [{ method: "where", args: ["score.something", "foo"] }],
+        CTX,
       ),
     ).toThrow('Invalid column "score.something" on model "result"');
   });
@@ -224,6 +240,7 @@ describePostgres("Ref subquery: dot-notation via queryFromClient", () => {
         },
         { method: "where", args: ["passed", true] },
       ],
+      CTX,
     );
 
     const results = await chain.find();
@@ -265,6 +282,7 @@ describePostgres("Ref subquery: schema cache simulation", () => {
       Result as unknown as ModelConstructor,
       {},
       [{ method: "where", args: ["test.category", "biometric"] }],
+      CTX,
     );
 
     const results = await chain.find();
@@ -288,6 +306,7 @@ describePostgres("Ref subquery: schema cache simulation", () => {
         Result as unknown as ModelConstructor,
         {},
         [{ method: "where", args: ["test.category", "biometric"] }],
+        CTX,
       );
 
       const results = await chain.find();
@@ -315,6 +334,7 @@ describePostgres("Ref subquery: schema cache simulation", () => {
           Result as unknown as ModelConstructor,
           {},
           [{ method: "where", args: ["test.category", "biometric"] }],
+          CTX,
         );
         await chain.find();
       }).rejects.toThrow('Invalid column "category" on referenced model "test"');
