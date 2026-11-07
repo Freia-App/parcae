@@ -21,6 +21,9 @@ import {
 
 class Test extends Model {
   static type = "test" as const;
+  // A ref filter reaches only target rows the caller could read directly,
+  // so the target needs a read scope; this one admits every row.
+  static scope = { read: () => (qb: any) => qb };
   category: string = "";
   name: string = "";
   status: string = "";
@@ -294,8 +297,9 @@ describePostgres("Ref subquery: schema cache simulation", () => {
     }
   });
 
-  it("should fall through when no registry and no __schema on ref target", async () => {
-    // Adapter without registerModels + stale cache = can't resolve ref
+  it("refuses a ref filter whose target model cannot be resolved", async () => {
+    // Adapter without registerModels + stale cache = can't resolve ref, so
+    // there is no read scope to bound the subquery and the filter is refused
     const staleSchema: SchemaDefinition = {
       test: { kind: "ref", target: { type: "test" } as any },
       score: "number",
@@ -306,16 +310,14 @@ describePostgres("Ref subquery: schema cache simulation", () => {
     try {
       (Result as any).__schema = staleSchema;
 
-      // No registry, no __schema on target — should still not crash,
-      // builds subquery without column validation
-      const chain = adapterNoRegistry.queryFromClient(
-        Result as unknown as ModelConstructor,
-        {},
-        [{ method: "where", args: ["test.category", "biometric"] }],
-      );
-
-      const results = await chain.find();
-      expect(results.length).toBeGreaterThan(0);
+      await expect(async () => {
+        const chain = adapterNoRegistry.queryFromClient(
+          Result as unknown as ModelConstructor,
+          {},
+          [{ method: "where", args: ["test.category", "biometric"] }],
+        );
+        await chain.find();
+      }).rejects.toThrow('Invalid column "category" on referenced model "test"');
     } finally {
       (Result as any).__schema = origSchema;
     }
