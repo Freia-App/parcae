@@ -162,27 +162,52 @@ describe("socket session log lines", () => {
     ]);
   });
 
-  it("says an adapter threw, with its error, and reads a v1 token's org", async () => {
+  it("says an adapter threw with the error's name and code only, and reads a v1 token's org", async () => {
+    const token = jwt({ sub: "user_2abc", org_id: "org_v1" });
     const adapter = {
-      resolveToken: async () => {
-        throw Object.assign(new Error("connection terminated"), {
+      resolveToken: async (presented: string) => {
+        // A parse error quotes its input, so its message would carry the token.
+        throw Object.assign(new SyntaxError(`"${presented}" is not valid JSON`), {
           code: "57P01",
         });
       },
     } as unknown as AuthAdapter;
     const controller = createSocketSessionController("s1", adapter, subscriptions);
-    await controller.hello({ token: jwt({ sub: "user_2abc", org_id: "org_v1" }) });
+    await controller.hello({ token });
     expect(logs.lines.map(own)).toEqual([
-      expect.objectContaining({
+      {
+        level: "warn",
+        tag: "socket",
         msg: "hello refused its token",
         user: "user_2abc",
         org: "org_v1",
         reason: "adapter-error",
-        errorName: "Error",
+        errorName: "SyntaxError",
         errorCode: "57P01",
-        errorMessage: "connection terminated",
-      }),
+      },
     ]);
+    expect(JSON.stringify(logs.lines)).not.toContain(token);
+  });
+
+  it("keeps each socket's reason to its own hello when two are judged at once", async () => {
+    const slowly = (reason: string, ms: number) =>
+      ({
+        resolveToken: async () => {
+          await new Promise((resolve) => setTimeout(resolve, ms));
+          return refuseToken(reason);
+        },
+      }) as unknown as AuthAdapter;
+    const first = createSocketSessionController("s1", slowly("idle-locked", 20), subscriptions);
+    const second = createSocketSessionController("s2", slowly("access-ended", 10), subscriptions);
+    const hellos = Promise.all([
+      first.hello({ token: jwt({ sub: "user_first" }) }),
+      second.hello({ token: jwt({ sub: "user_second" }) }),
+    ]);
+    await vi.advanceTimersByTimeAsync(20);
+    await hellos;
+    expect(
+      Object.fromEntries(logs.lines.map((line) => [line.user, line.reason])),
+    ).toEqual({ user_first: "idle-locked", user_second: "access-ended" });
   });
 
   it("names nothing for a reason given outside a hello or renew", async () => {

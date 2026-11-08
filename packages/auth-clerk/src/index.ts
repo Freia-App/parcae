@@ -131,7 +131,7 @@ export function clerk(config: ClerkConfig): AuthAdapter {
         : cause instanceof Error
           ? cause.name
           : "unknown";
-    refuseToken(reason, cause instanceof Error ? cause : undefined);
+    refuseToken(reason);
     const { sub, exp } = unverifiedTokenClaims(token);
     const key = `${sub}:${reason}`;
     const now = Date.now();

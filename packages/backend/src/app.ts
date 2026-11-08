@@ -617,7 +617,7 @@ export function createSocketSessionController(
         await onBoundary?.();
         if (authAdapter && typeof token === "string" && token) {
           const judged = await runInFrame(
-            { user: claims.sub ?? null, org: claims.org ?? null, role: null },
+            { user: claims.sub ?? null, org: null, role: null },
             () => judgeToken(() => authAdapter.resolveToken(token)),
           );
           refusal = judged.refusal;
@@ -643,9 +643,9 @@ export function createSocketSessionController(
             const exp = claims.exp;
             log.warn("[socket] hello refused its token", {
               user: claims.sub,
+              // Only the refusal names the org: nothing verified it.
               org: claims.org,
-              reason: refusal?.reason,
-              error: refusal?.error,
+              ...refusal,
               expiredAgoMs:
                 exp !== undefined && Date.now() > exp * 1000
                   ? Date.now() - exp * 1000
@@ -697,23 +697,25 @@ export function createSocketSessionController(
       }
       const judged = await judgeToken(() => authAdapter.resolveToken(token));
       const user = snapshot.session.user?.id;
-      const refuse = (reason: string, error?: unknown) => {
+      const refuse = (refusal: TokenRefusal) => {
         // A hello that landed meanwhile owns the socket now; the refusal
         // belongs to the session it replaced.
         if (reconciler.isOperationCurrent(snapshot.operation)) {
-          lastRenewRefusal = reason;
+          lastRenewRefusal = refusal.reason;
         }
         if (withinLogBudget()) {
-          log.info("[socket] renew refused", { user, reason, error });
+          log.info("[socket] renew refused", { user, ...refusal });
         }
         return refused;
       };
-      if (judged.session === null) {
-        return refuse(judged.refusal.reason, judged.refusal.error);
-      }
+      if (judged.session === null) return refuse(judged.refusal);
       const next = judged.session;
-      if (!sameAuthorization(snapshot.session, next)) return refuse("changed");
-      if (!reconciler.replace(snapshot, next)) return refuse("superseded");
+      if (!sameAuthorization(snapshot.session, next)) {
+        return refuse({ reason: "changed" });
+      }
+      if (!reconciler.replace(snapshot, next)) {
+        return refuse({ reason: "superseded" });
+      }
       renews++;
       lastRenewAt = Date.now();
       armExpiry();

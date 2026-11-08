@@ -124,18 +124,15 @@ describe("clerk server adapter", () => {
     const auth = clerk(config);
     await auth.setup(setupContext());
     const expired = await judgeToken(() => auth.resolveToken("header.e30.sig"));
-    expect(expired.refusal).toMatchObject({
-      reason: "token-expired",
-      error: expect.objectContaining({ message: "JWT is expired" }),
-    });
+    expect(expired.refusal).toEqual({ reason: "token-expired" });
 
     mocks.getUser.mockRejectedValueOnce(new Error("Clerk unavailable"));
     const unprovisioned = await judgeToken(() =>
       auth.resolveToken("header.e30.sig"),
     );
-    expect(unprovisioned.refusal).toMatchObject({
+    expect(unprovisioned.refusal).toEqual({
       reason: "provision-failed",
-      error: expect.objectContaining({ message: "Clerk unavailable" }),
+      errorName: "Error",
     });
   });
 
