@@ -18,6 +18,7 @@ import {
   createSocketRequestEvents,
 } from "./socket-fake-res";
 import { SocketSessionReconciler } from "./socket-session-reconciler";
+import { judgeToken, type TokenRefusal } from "./token-refusal";
 import {
   clientDiagnostics,
   disconnectReason,
@@ -604,6 +605,8 @@ export function createSocketSessionController(
         (payload as { client?: unknown } | null)?.client,
       );
       if (client) withLogContext(client);
+      // Set inside reconcile's callback, which TypeScript cannot follow.
+      let refusal = null as TokenRefusal | null;
       const result = await reconciler.reconcile(async () => {
         clearExpiry();
         // reconcile() has already cleared the published session, so an
@@ -613,14 +616,12 @@ export function createSocketSessionController(
         subscriptions.unsubscribeAll(socketId);
         await onBoundary?.();
         if (authAdapter && typeof token === "string" && token) {
-          try {
-            return await runInFrame(
-              { user: claims.sub ?? null, org: null, role: null },
-              () => authAdapter.resolveToken(token),
-            );
-          } catch {
-            return null;
-          }
+          const judged = await runInFrame(
+            { user: claims.sub ?? null, org: claims.org ?? null, role: null },
+            () => judgeToken(() => authAdapter.resolveToken(token)),
+          );
+          refusal = judged.refusal;
+          return judged.session;
         }
         return null;
       });
@@ -642,6 +643,9 @@ export function createSocketSessionController(
             const exp = claims.exp;
             log.warn("[socket] hello refused its token", {
               user: claims.sub,
+              org: claims.org,
+              reason: refusal?.reason,
+              error: refusal?.error,
               expiredAgoMs:
                 exp !== undefined && Date.now() > exp * 1000
                   ? Date.now() - exp * 1000
@@ -691,25 +695,23 @@ export function createSocketSessionController(
       if (!authAdapter || !snapshot?.session || typeof token !== "string") {
         return refused;
       }
-      let next: AuthSession | null = null;
-      try {
-        next = await authAdapter.resolveToken(token);
-      } catch {
-        next = null;
-      }
+      const judged = await judgeToken(() => authAdapter.resolveToken(token));
       const user = snapshot.session.user?.id;
-      const refuse = (reason: string) => {
+      const refuse = (reason: string, error?: unknown) => {
         // A hello that landed meanwhile owns the socket now; the refusal
         // belongs to the session it replaced.
         if (reconciler.isOperationCurrent(snapshot.operation)) {
           lastRenewRefusal = reason;
         }
         if (withinLogBudget()) {
-          log.info("[socket] renew refused", { user, reason });
+          log.info("[socket] renew refused", { user, reason, error });
         }
         return refused;
       };
-      if (!next) return refuse("unresolved");
+      if (judged.session === null) {
+        return refuse(judged.refusal.reason, judged.refusal.error);
+      }
+      const next = judged.session;
       if (!sameAuthorization(snapshot.session, next)) return refuse("changed");
       if (!reconciler.replace(snapshot, next)) return refuse("superseded");
       renews++;

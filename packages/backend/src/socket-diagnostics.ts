@@ -91,11 +91,13 @@ export function disconnectReason(raw: unknown): string | undefined {
 }
 
 /**
- * The `sub` and `exp` of a JWT, read without verifying it: who a token
- * says it is, for naming the line when it is refused.
+ * The `sub`, active organisation and `exp` of a JWT, read without
+ * verifying it: who a token says it is, for naming the line when it is
+ * refused.
  */
 export function unverifiedTokenClaims(token: string): {
   sub?: string;
+  org?: string;
   exp?: number;
 } {
   try {
@@ -104,6 +106,8 @@ export function unverifiedTokenClaims(token: string): {
     );
     return {
       sub: isLogId(payload?.sub) ? payload.sub : undefined,
+      // Clerk v2 tokens name the active organisation as `o.id`, v1 as `org_id`.
+      org: [payload?.o?.id, payload?.org_id].find(isLogId),
       exp:
         typeof payload?.exp === "number" && Number.isFinite(payload.exp)
           ? payload.exp

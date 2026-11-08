@@ -29,6 +29,7 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import {
   log,
+  refuseToken,
   unverifiedTokenClaims,
   type AuthAdapter,
   type AuthSession,
@@ -117,7 +118,8 @@ export function clerk(config: ClerkConfig): AuthAdapter {
   let refusalWindowStart = 0;
   const refusalsLogged = new Set<string>();
   // Inside a socket hello or the HTTP auth step, the line also carries the
-  // frame's IP and app, so one line says who, from where and why.
+  // frame's IP and app, so one line says who, from where and why. A hello
+  // or renew also names the reason on its own line, every time.
   const logRefusal = (token: string, cause: unknown) => {
     const rawReason =
       typeof cause === "string"
@@ -129,6 +131,7 @@ export function clerk(config: ClerkConfig): AuthAdapter {
         : cause instanceof Error
           ? cause.name
           : "unknown";
+    refuseToken(reason, cause instanceof Error ? cause : undefined);
     const { sub, exp } = unverifiedTokenClaims(token);
     const key = `${sub}:${reason}`;
     const now = Date.now();
@@ -294,7 +297,7 @@ export function clerk(config: ClerkConfig): AuthAdapter {
         user: userId,
         error: err,
       });
-      return null;
+      return refuseToken("provision-failed", err);
     }
 
     // Extract org context from Clerk JWT.
