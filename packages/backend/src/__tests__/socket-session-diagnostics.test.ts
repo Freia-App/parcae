@@ -210,6 +210,22 @@ describe("socket session log lines", () => {
     ).toEqual({ user_first: "idle-locked", user_second: "access-ended" });
   });
 
+  it("logs a refusal the app expects at info, and every other at warn", async () => {
+    const refusing = (expected: boolean) =>
+      ({
+        resolveToken: async () => refuseToken("idle-locked", { expected }),
+      }) as unknown as AuthAdapter;
+    for (const expected of [true, false]) {
+      await createSocketSessionController("s1", refusing(expected), subscriptions).hello({
+        token: jwt({ sub: "user_2abc" }),
+      });
+    }
+    expect(logs.lines.map((line) => [line.level, line.reason, line.expected])).toEqual([
+      ["info", "idle-locked", undefined],
+      ["warn", "idle-locked", undefined],
+    ]);
+  });
+
   it("names nothing for a reason given outside a hello or renew", async () => {
     expect(refuseToken("idle-locked")).toBeNull();
     const controller = createSocketSessionController(

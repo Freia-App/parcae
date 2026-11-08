@@ -641,11 +641,14 @@ export function createSocketSessionController(
         if (presented && authAdapter && !session) {
           if (withinLogBudget()) {
             const exp = claims.exp;
-            log.warn("[socket] hello refused its token", {
+            // A refusal the app expects (a locked session) is no fault, so
+            // it stays out of the warnings an alert counts.
+            const { expected, ...named }: Partial<TokenRefusal> = refusal ?? {};
+            log[expected ? "info" : "warn"]("[socket] hello refused its token", {
               user: claims.sub,
               // Only the refusal names the org: nothing verified it.
               org: claims.org,
-              ...refusal,
+              ...named,
               expiredAgoMs:
                 exp !== undefined && Date.now() > exp * 1000
                   ? Date.now() - exp * 1000
@@ -704,7 +707,8 @@ export function createSocketSessionController(
           lastRenewRefusal = refusal.reason;
         }
         if (withinLogBudget()) {
-          log.info("[socket] renew refused", { user, ...refusal });
+          const { expected: _expected, ...named } = refusal;
+          log.info("[socket] renew refused", { user, ...named });
         }
         return refused;
       };
