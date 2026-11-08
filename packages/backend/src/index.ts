@@ -218,6 +218,7 @@ export { clientIp } from "./client-identity";
 export { unverifiedTokenClaims } from "./socket-diagnostics";
 export {
   judgeToken,
+  type RefusalDetail,
   refuseToken,
   type TokenRefusal,
 } from "./token-refusal";

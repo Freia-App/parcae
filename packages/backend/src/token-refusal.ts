@@ -10,20 +10,32 @@ export interface TokenRefusal {
   reason: string;
   errorName?: string;
   errorCode?: string;
+  /** A refusal the app expects, such as a locked session: logged at info. */
+  expected?: true;
 }
 
 const judging = new AsyncLocalStorage<{ refusal?: TokenRefusal }>();
 
-function refusal(reason: string, error?: unknown): TokenRefusal {
-  if (error === undefined) {
-    return { reason };
-  }
+function refusal(
+  reason: string,
+  { error, expected }: RefusalDetail = {},
+): TokenRefusal {
   const code = String((error as { code?: unknown } | null)?.code ?? "");
   return {
     reason,
-    errorName: error instanceof Error ? error.name : typeof error,
-    ...(isLogId(code) && { errorCode: code }),
+    ...(error !== undefined && {
+      errorName: error instanceof Error ? error.name : typeof error,
+      ...(isLogId(code) && { errorCode: code }),
+    }),
+    ...(expected && { expected }),
   };
+}
+
+export interface RefusalDetail {
+  /** What the adapter caught; only its name and code reach the line. */
+  error?: unknown;
+  /** The app expects this refusal (a locked session), not a fault. */
+  expected?: boolean;
 }
 
 /**
@@ -32,10 +44,10 @@ function refusal(reason: string, error?: unknown): TokenRefusal {
  * wins: the innermost adapter decides first, and a wrapper passing a null
  * through names nothing. Outside a socket hello or renew it does nothing.
  */
-export function refuseToken(reason: string, error?: unknown): null {
+export function refuseToken(reason: string, detail?: RefusalDetail): null {
   const slot = judging.getStore();
   if (slot && !slot.refusal) {
-    slot.refusal = refusal(reason, error);
+    slot.refusal = refusal(reason, detail);
   }
   return null;
 }
@@ -57,6 +69,6 @@ export async function judgeToken<S>(
       ? { session, refusal: null }
       : { session: null, refusal: slot.refusal ?? { reason: "unexplained" } };
   } catch (error) {
-    return { session: null, refusal: refusal("adapter-error", error) };
+    return { session: null, refusal: refusal("adapter-error", { error }) };
   }
 }

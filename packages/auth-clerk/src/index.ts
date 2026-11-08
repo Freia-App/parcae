@@ -297,7 +297,7 @@ export function clerk(config: ClerkConfig): AuthAdapter {
         user: userId,
         error: err,
       });
-      return refuseToken("provision-failed", err);
+      return refuseToken("provision-failed", { error: err });
     }
 
     // Extract org context from Clerk JWT.
