@@ -8,6 +8,7 @@ import { createSocketSessionController } from "../app";
 import type { AuthAdapter, AuthSession } from "../auth";
 import { captureLogs, type Line, log, withLogContext } from "../log";
 import { clientDiagnostics, withinLogBudget } from "../socket-diagnostics";
+import { refuseToken } from "../token-refusal";
 
 const subscriptions = { unsubscribeAll: () => {} };
 const NOW = 1_900_000_000_000;
@@ -124,6 +125,7 @@ describe("socket session log lines", () => {
         appVersion: "2026.11.07",
         platform: "web",
         trigger: "socket",
+        reason: "unexplained",
         expiredAgoMs: 30_000,
         disconnect: "transport-close",
         offlineMs: 900,
@@ -132,6 +134,91 @@ describe("socket session log lines", () => {
         renewOutcome: "token-unchanged",
       },
     ]);
+  });
+
+  it("names the reason the innermost adapter gave, and the org the token named", async () => {
+    // A wrapper that passes its inner adapter's null through, as the API's
+    // access guard does; its own late reason must not replace the first.
+    const inner = {
+      resolveToken: async () => refuseToken("idle-locked"),
+    };
+    const adapter = {
+      resolveToken: async () =>
+        (await inner.resolveToken()) ?? refuseToken("access-ended"),
+    } as unknown as AuthAdapter;
+    const controller = createSocketSessionController("s1", adapter, subscriptions);
+    await controller.hello({
+      token: jwt({ sub: "user_2abc", o: { id: "org_2xyz" }, exp: NOW / 1000 + 60 }),
+    });
+    expect(logs.lines.map(own)).toEqual([
+      {
+        level: "warn",
+        tag: "socket",
+        msg: "hello refused its token",
+        user: "user_2abc",
+        org: "org_2xyz",
+        reason: "idle-locked",
+      },
+    ]);
+  });
+
+  it("says an adapter threw with the error's name and code only, and reads a v1 token's org", async () => {
+    const token = jwt({ sub: "user_2abc", org_id: "org_v1" });
+    const adapter = {
+      resolveToken: async (presented: string) => {
+        // A parse error quotes its input, so its message would carry the token.
+        throw Object.assign(new SyntaxError(`"${presented}" is not valid JSON`), {
+          code: "57P01",
+        });
+      },
+    } as unknown as AuthAdapter;
+    const controller = createSocketSessionController("s1", adapter, subscriptions);
+    await controller.hello({ token });
+    expect(logs.lines.map(own)).toEqual([
+      {
+        level: "warn",
+        tag: "socket",
+        msg: "hello refused its token",
+        user: "user_2abc",
+        org: "org_v1",
+        reason: "adapter-error",
+        errorName: "SyntaxError",
+        errorCode: "57P01",
+      },
+    ]);
+    expect(JSON.stringify(logs.lines)).not.toContain(token);
+  });
+
+  it("keeps each socket's reason to its own hello when two are judged at once", async () => {
+    const slowly = (reason: string, ms: number) =>
+      ({
+        resolveToken: async () => {
+          await new Promise((resolve) => setTimeout(resolve, ms));
+          return refuseToken(reason);
+        },
+      }) as unknown as AuthAdapter;
+    const first = createSocketSessionController("s1", slowly("idle-locked", 20), subscriptions);
+    const second = createSocketSessionController("s2", slowly("access-ended", 10), subscriptions);
+    const hellos = Promise.all([
+      first.hello({ token: jwt({ sub: "user_first" }) }),
+      second.hello({ token: jwt({ sub: "user_second" }) }),
+    ]);
+    await vi.advanceTimersByTimeAsync(20);
+    await hellos;
+    expect(
+      Object.fromEntries(logs.lines.map((line) => [line.user, line.reason])),
+    ).toEqual({ user_first: "idle-locked", user_second: "access-ended" });
+  });
+
+  it("names nothing for a reason given outside a hello or renew", async () => {
+    expect(refuseToken("idle-locked")).toBeNull();
+    const controller = createSocketSessionController(
+      "s1",
+      adapterWith({}),
+      subscriptions,
+    );
+    await controller.hello({ token: jwt({ sub: "user_2abc" }) });
+    expect(logs.lines.map((line) => line.reason)).toEqual(["unexplained"]);
   });
 
   it("logs a reconnect with the user and the time its token has left", async () => {
@@ -219,6 +306,41 @@ describe("socket session log lines", () => {
         },
       ],
     ]);
+  });
+
+  it("names why a renew's token no longer resolved, on its line and the lapse line", async () => {
+    const onExpired = vi.fn();
+    const sessions: Record<string, () => AuthSession | null> = {
+      t1: session("org:admin", 60_000),
+      t2: () => refuseToken("idle-locked"),
+    };
+    const controller = createSocketSessionController(
+      "s1",
+      {
+        resolveToken: async (token: string) => sessions[token]?.() ?? null,
+      } as unknown as AuthAdapter,
+      subscriptions,
+      undefined,
+      onExpired,
+    );
+    await controller.hello({ token: "t1" });
+    await vi.advanceTimersByTimeAsync(45_000);
+    await expect(controller.renew({ token: "t2" })).resolves.toMatchObject({
+      success: false,
+    });
+    expect(logs.lines.map(own)).toEqual([
+      {
+        level: "info",
+        tag: "socket",
+        msg: "renew refused",
+        user: "u1",
+        reason: "idle-locked",
+      },
+    ]);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(onExpired.mock.calls[0]?.[0]).toMatchObject({
+      lastRenewRefusal: "idle-locked",
+    });
   });
 
   it("takes the client a renew names, so a page that moved is named right", async () => {

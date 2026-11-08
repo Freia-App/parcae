@@ -216,6 +216,11 @@ export type {
 } from "./log";
 export { clientIp } from "./client-identity";
 export { unverifiedTokenClaims } from "./socket-diagnostics";
+export {
+  judgeToken,
+  refuseToken,
+  type TokenRefusal,
+} from "./token-refusal";
 
 // Re-export model for convenience
 export { Model } from "@parcae/model";

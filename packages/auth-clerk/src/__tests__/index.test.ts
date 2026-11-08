@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import {
   captureLogs,
   createServer_,
+  judgeToken,
   log,
   withLogContext,
   type AuthSetupContext,
@@ -114,6 +115,25 @@ describe("clerk server adapter", () => {
     expect(logs.lines).toHaveLength(2);
     logs.stop();
     now.mockRestore();
+  });
+
+  it("names Clerk's reason, or a failed provision, to the hello judging the token", async () => {
+    mocks.verifyToken.mockRejectedValueOnce(
+      Object.assign(new Error("JWT is expired"), { reason: "token-expired" }),
+    );
+    const auth = clerk(config);
+    await auth.setup(setupContext());
+    const expired = await judgeToken(() => auth.resolveToken("header.e30.sig"));
+    expect(expired.refusal).toEqual({ reason: "token-expired" });
+
+    mocks.getUser.mockRejectedValueOnce(new Error("Clerk unavailable"));
+    const unprovisioned = await judgeToken(() =>
+      auth.resolveToken("header.e30.sig"),
+    );
+    expect(unprovisioned.refusal).toEqual({
+      reason: "provision-failed",
+      errorName: "Error",
+    });
   });
 
   it("names why a verified token gave no session", async () => {
