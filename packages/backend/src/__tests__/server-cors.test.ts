@@ -120,7 +120,37 @@ describe("CORS origins", () => {
     const base = await start(check);
 
     expect(await decisions(base, CLINIC)).toEqual(ALLOWED);
-    expect(check).toHaveBeenCalledWith(CLINIC);
+    expect(check).toHaveBeenCalledWith(CLINIC, "/ping");
+  });
+
+  it("passes the request path, so an origin can be admitted on chosen routes only", async () => {
+    const check = vi.fn(
+      (origin: string, path?: string) => origin === CLINIC && path === "/ping",
+    );
+    const base = await start(check);
+    const preflightTo = async (path: string) => {
+      const res = await fetch(`${base}${path}?q=1`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: CLINIC,
+          "Access-Control-Request-Method": "GET",
+          "Access-Control-Request-Headers": "authorization",
+        },
+      });
+      expect(res.status).toBe(204);
+      return readAllowed(res, CLINIC);
+    };
+
+    expect(await decisions(base, CLINIC)).toEqual({
+      http: true,
+      preflight: true,
+      socket: false,
+    });
+    expect(await preflightTo("/ping")).toBe(true);
+    expect(await preflightTo("/elsewhere")).toBe(false);
+    expect(check).toHaveBeenCalledWith(CLINIC, "/ping");
+    expect(check).toHaveBeenCalledWith(CLINIC, "/elsewhere");
+    expect(check).toHaveBeenCalledWith(CLINIC, undefined);
   });
 
   it("denies an origin the callback rejects", async () => {

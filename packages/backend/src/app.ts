@@ -220,6 +220,10 @@ export interface AppConfig {
    * back with credentials allowed, never `*`. Called on every
    * cross-origin request the static list misses, preflights included, so
    * keep it fast: cache any database lookup behind it.
+   *
+   * The HTTP request's path comes as a second argument (the Socket.IO
+   * handshake passes none), so an app can admit an origin on chosen routes
+   * only; such an origin never opens a socket.
    */
   isTrustedOrigin?: TrustedOriginCheck;
 }
