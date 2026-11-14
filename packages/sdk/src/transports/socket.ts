@@ -1157,6 +1157,15 @@ export class SocketTransport extends EventEmitter implements Transport {
           followed = true;
           continue;
         }
+        // A hello the socket dropped under was never refused: the next
+        // connection says hello again, and a call made in the gap (an
+        // app that closed the socket and has just dialed it again)
+        // belongs to that one.
+        if (!this.socket.connected && Date.now() < deadline) {
+          await this._waitForConnection();
+          followed = true;
+          continue;
+        }
         throw error;
       }
       if (

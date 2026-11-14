@@ -569,6 +569,30 @@ describe("SocketTransport — hello/resync protocol", () => {
     await expect(reconnect).rejects.toThrow("Missing hello acknowledgement");
   });
 
+  it("a call made while a hello cut off by disconnect() waits for the next connection", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = makeTransport(async () => "token");
+      currentSocket.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      // An app closes the socket before its first hello is answered
+      // (a lock screen on page load), then dials again later.
+      transport.disconnect();
+      const call = transport.get("/posts");
+      await vi.advanceTimersByTimeAsync(0);
+
+      void transport.reconnect();
+      await vi.advanceTimersByTimeAsync(0);
+      ackHello("user");
+      await vi.advanceTimersByTimeAsync(0);
+      respondToLatestCall({ result: [{ id: "p1" }], success: true });
+
+      await expect(call).resolves.toEqual([{ id: "p1" }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("starts a fresh handshake when reconnect follows a failed hello", async () => {
     const transport = makeTransport(async () => "token");
     currentSocket.connect();
