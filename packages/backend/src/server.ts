@@ -33,9 +33,14 @@ export interface ServerContext {
  * Runtime CORS check for origins the static `TRUSTED_ORIGINS` list does not
  * cover, e.g. customer domains added after boot. Resolve `true` to allow.
  * Anything else, including a throw or rejection, denies the origin.
+ *
+ * `path` is the HTTP request's path (no query), the same for a preflight and
+ * the request it precedes, so an app can admit an origin on chosen routes
+ * only. The Socket.IO handshake passes none.
  */
 export type TrustedOriginCheck = (
   origin: string,
+  path?: string,
 ) => boolean | Promise<boolean>;
 
 export interface ServerOptions {
@@ -253,7 +258,8 @@ export function createServer_(options: ServerOptions): ServerContext {
 
     if (!origin) return finish(false);
     // Static-list hits stay synchronous; only a runtime check awaits.
-    const decision = allowOrigin(origin);
+    const path = req.path ?? String(req.url ?? "").split("?")[0] ?? "";
+    const decision = allowOrigin(origin, path);
     if (typeof decision === "boolean") return finish(decision);
     decision.then(finish);
   });
@@ -326,13 +332,13 @@ export function listenServer(
 export function createOriginPolicy(
   trustedOrigins: string[],
   isTrustedOrigin?: TrustedOriginCheck,
-): (origin: string) => boolean | Promise<boolean> {
-  return (origin) => {
+): (origin: string, path?: string) => boolean | Promise<boolean> {
+  return (origin, path) => {
     if (isOriginAllowed(origin, trustedOrigins)) return true;
     if (!isTrustedOrigin) return false;
     return (async () => {
       try {
-        return (await isTrustedOrigin(origin)) === true;
+        return (await isTrustedOrigin(origin, path)) === true;
       } catch (err) {
         log.error("[cors] isTrustedOrigin failed, denying origin", {
           origin: stripQuery(origin),
